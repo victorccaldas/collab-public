@@ -224,7 +224,7 @@ contextBridge.exposeInMainWorld("shellApi", {
     ipcRenderer.invoke("pty:kill", { sessionId }),
 
   ptyWrite: (sessionId: string, data: string): Promise<void> =>
-    ipcRenderer.invoke("pty:write", { sessionId, data }),
+    ipcRenderer.invoke("pty:write-invoke", { sessionId, data }),
 
   ptyCapture: (
     sessionId: string, lines?: number,

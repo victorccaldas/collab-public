@@ -575,10 +575,19 @@ ipcMain.handle(
     ),
 );
 
-ipcMain.handle(
+// Fire-and-forget path (universal preload → terminal tiles: low-latency keystrokes)
+ipcMain.on(
   "pty:write",
-  (_event, { sessionId, data }: { sessionId: string; data: string }) =>
-    pty.writeToSession(sessionId, data),
+  (_event, { sessionId, data }: { sessionId: string; data: string }) => {
+    pty.writeToSession(sessionId, data);
+  },
+);
+// Async invoke path (shell preload → canvas RPC terminalWrite)
+ipcMain.handle(
+  "pty:write-invoke",
+  (_event, { sessionId, data }: { sessionId: string; data: string }) => {
+    pty.writeToSession(sessionId, data);
+  },
 );
 
 ipcMain.handle(

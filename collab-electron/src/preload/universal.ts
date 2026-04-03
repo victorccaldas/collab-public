@@ -269,8 +269,9 @@ contextBridge.exposeInMainWorld("api", {
       "pty:create",
       { cwd, cols, rows, target, tileId },
     ),
-  ptyWrite: (sessionId: string, data: string) =>
-    ipcRenderer.invoke("pty:write", { sessionId, data }),
+  ptyWrite: (sessionId: string, data: string) => {
+    ipcRenderer.send("pty:write", { sessionId, data });
+  },
   ptySendRawKeys: (sessionId: string, data: string) =>
     ipcRenderer.invoke("pty:send-raw-keys", { sessionId, data }),
   ptyResize: (

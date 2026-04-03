@@ -25,6 +25,8 @@ interface TerminalTabProps {
 function TerminalTab({ sessionId, visible, restored, scrollbackData, mode }: TerminalTabProps) {
 	const containerRef = useRef<HTMLDivElement>(null);
 	const fitRef = useRef<FitAddon | null>(null);
+	const termRef = useRef<Terminal | null>(null);
+	const webglRef = useRef<WebglAddon | null>(null);
 
 	useEffect(() => {
 		const container = containerRef.current;
@@ -45,22 +47,14 @@ function TerminalTab({ sessionId, visible, restored, scrollbackData, mode }: Ter
 		term.loadAddon(fit);
 		term.open(container);
 		fitRef.current = fit;
+		termRef.current = term;
 
 		const unicode11 = new Unicode11Addon();
 		term.loadAddon(unicode11);
 		term.unicode.activeVersion = "11";
 
-		// WebGL renderer: double-buffered canvas avoids the
-		// partial-paint artifacts the DOM renderer can show
-		// during rapid sequential writes. Falls back to DOM
-		// if the GPU context can't be acquired.
-		try {
-			const webgl = new WebglAddon();
-			webgl.onContextLoss(() => webgl.dispose());
-			term.loadAddon(webgl);
-		} catch {
-			// DOM renderer fallback — no action needed
-		}
+		// WebGL is loaded/disposed based on visibility in a
+		// separate effect to free GPU contexts for hidden terminals.
 
 		// Delay initial fit: the webview may not have its final
 		// dimensions when the page first loads. Double-rAF ensures
@@ -273,14 +267,44 @@ function TerminalTab({ sessionId, visible, restored, scrollbackData, mode }: Ter
 			container.removeEventListener("paste", handlePaste, true);
 			window.api.offPtyData(sessionId, handleData);
 			offShellBlur();
+			if (webglRef.current) {
+				webglRef.current.dispose();
+				webglRef.current = null;
+			}
 			term.dispose();
+			termRef.current = null;
 			fitRef.current = null;
 		};
 	}, [sessionId]);
 
+	// Manage WebGL context based on visibility: only visible
+	// terminals hold a GPU context, freeing slots for others.
+	// Chromium limits simultaneous WebGL contexts (~8-16);
+	// beyond that it evicts and recreates them, causing jank.
 	useEffect(() => {
-		if (visible && fitRef.current) {
+		const term = termRef.current;
+		if (!term) return;
+
+		if (visible) {
+			if (!webglRef.current) {
+				try {
+					const webgl = new WebglAddon();
+					webgl.onContextLoss(() => {
+						webgl.dispose();
+						webglRef.current = null;
+					});
+					term.loadAddon(webgl);
+					webglRef.current = webgl;
+				} catch {
+					// DOM renderer fallback — no action needed
+				}
+			}
 			requestAnimationFrame(() => fitRef.current?.fit());
+		} else {
+			if (webglRef.current) {
+				webglRef.current.dispose();
+				webglRef.current = null;
+			}
 		}
 	}, [visible]);
 

@@ -225,7 +225,7 @@ export interface CollabApi {
   ptyWrite: (
     sessionId: string,
     data: string,
-  ) => Promise<void>;
+  ) => void;
   ptySendRawKeys: (
     sessionId: string,
     data: string,
