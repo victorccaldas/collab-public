@@ -41,11 +41,19 @@ window.shellApi.getPref("canvasOpacity").then((v) => {
 	broadcastCanvasOpacity();
 });
 
+window.shellApi.getPref("canvasBindings").then((v) => {
+	if (v === "classic" || v === "click-to-pan") canvasBindings = v;
+});
+
 window.shellApi.onPrefChanged((key, value) => {
 	if (key === "canvasOpacity") {
 		lastCanvasOpacity = value;
 		applyCanvasOpacity(value);
 		broadcastCanvasOpacity();
+	} else if (key === "canvasBindings") {
+		if (value === "classic" || value === "click-to-pan") {
+			canvasBindings = value;
+		}
 	}
 });
 
@@ -129,6 +137,7 @@ async function init() {
 	let shiftHeld = false;
 	let spaceHeld = false;
 	let isPanning = false;
+	let canvasBindings = "click-to-pan"; // "click-to-pan" | "classic"
 	let suppressCanvasDblClickUntil = 0;
 
 	// -- Drag-and-drop handler (shared with webviews) --
@@ -298,6 +307,17 @@ async function init() {
 			const entry = buildTerminalListEntry(tile, session?.meta);
 			if (entry) {
 				terminalListWebview.send("terminal-list:add", entry);
+			}
+			if (tile.pendingCommand && tile.ptySessionId) {
+				setTimeout(async () => {
+					try {
+						await window.shellApi.ptyWrite(
+							tile.ptySessionId,
+							tile.pendingCommand + "\r",
+						);
+					} catch {}
+					delete tile.pendingCommand;
+				}, 500);
 			}
 		},
 		onTerminalTileClosed(sessionId) {
@@ -620,6 +640,7 @@ async function init() {
 		},
 		isShiftHeld: () => shiftHeld,
 		isSpaceHeld: () => spaceHeld,
+		getCanvasBindings: () => canvasBindings,
 		getAllWebviews,
 	});
 
@@ -713,8 +734,19 @@ async function init() {
 	});
 
 	canvasEl.addEventListener("mousedown", (e) => {
-		const shouldPan =
-			e.button === 1 || (e.button === 0 && spaceHeld);
+		// Middle-click always pans. Left-click depends on binding mode.
+		const isMiddle = e.button === 1;
+		const isLeftPan = e.button === 0 && (
+			canvasBindings === "click-to-pan"
+				? !e.ctrlKey && !e.metaKey  // plain click = pan; ctrl+click = marquee
+				: spaceHeld                  // classic: space+click = pan
+		);
+		// Only pan if clicking on the canvas background (not on a tile)
+		const onBackground =
+			e.target === canvasEl ||
+			e.target === document.getElementById("tile-layer") ||
+			e.target === document.getElementById("grid-canvas");
+		const shouldPan = (isMiddle || (isLeftPan && onBackground));
 		if (!shouldPan) return;
 
 		e.preventDefault();
@@ -727,12 +759,15 @@ async function init() {
 		const startMY = e.clientY;
 		const startPanX = viewportState.panX;
 		const startPanY = viewportState.panY;
+		let panMoved = false;
 
 		for (const h of getAllWebviews()) {
 			h.webview.style.pointerEvents = "none";
 		}
 
 		function onMove(ev) {
+			const dist = Math.hypot(ev.clientX - startMX, ev.clientY - startMY);
+			if (dist >= 3) panMoved = true;
 			viewportState.panX = startPanX + (ev.clientX - startMX);
 			viewportState.panY = startPanY + (ev.clientY - startMY);
 			viewport.updateCanvas();
@@ -748,6 +783,15 @@ async function init() {
 			document.removeEventListener("mouseup", onUp);
 			for (const h of getAllWebviews()) {
 				h.webview.style.pointerEvents = "";
+			}
+			// Click without drag on canvas background = clear selection
+			if (!panMoved && onBackground) {
+				clearSelection();
+				tileManager.syncSelectionVisuals();
+				tileManager.blurCanvasTileGuest();
+				tileManager.clearTileFocusRing();
+				tileManager.setFocusedTileId(null);
+				canvasEl.focus();
 			}
 		}
 
@@ -897,6 +941,7 @@ async function init() {
 			} else if (target === "canvas") {
 				if (channel === "open-terminal") {
 					const cwd = args[0];
+					const command = args[1];
 					const size = defaultSize("term");
 					const rect = canvasEl.getBoundingClientRect();
 					const cx =
@@ -908,6 +953,9 @@ async function init() {
 					const tile = tileManager.createCanvasTile(
 						"term", cx, cy, { cwd },
 					);
+					if (command) {
+						tile.pendingCommand = command;
+					}
 					tileManager.spawnTerminalWebview(tile, true);
 					tileManager.saveCanvasImmediate();
 				}

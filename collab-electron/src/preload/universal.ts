@@ -196,8 +196,8 @@ contextBridge.exposeInMainWorld("api", {
     ipcRenderer.invoke("fs:read-folder-table", folderPath),
   importWebArticle: (url: string, targetDir: string) =>
     ipcRenderer.invoke("import:web-article", url, targetDir),
-  openInTerminal: (path: string) =>
-    ipcRenderer.send("nav:open-in-terminal", path),
+  openInTerminal: (path: string, command?: string) =>
+    ipcRenderer.send("nav:open-in-terminal", path, command),
   revealInFinder: (path: string) =>
     ipcRenderer.send("nav:reveal-in-finder", path),
   createGraphTile: (folderPath: string) =>

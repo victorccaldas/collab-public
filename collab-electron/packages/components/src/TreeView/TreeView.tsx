@@ -12,6 +12,7 @@ import {
 	Terminal,
 	Plus,
 	Graph,
+	Robot,
 } from '@phosphor-icons/react';
 import type { FlatItem } from './useFileTree';
 import type { TreeNode } from '@collab/shared/types';
@@ -215,6 +216,30 @@ const FolderRow = React.memo(function FolderRow({
 				}}
 			>
 				<Terminal size={12} weight="bold" />
+			</button>
+			<button
+				className="folder-action-button"
+				title="Open AI agent"
+				onClick={async (e) => {
+					e.stopPropagation();
+					const choice = await window.api.showContextMenu([
+						{ id: "claude", label: "Claude" },
+						{ id: "copilot", label: "Copilot" },
+					]);
+					if (choice === "claude") {
+						window.api.openInTerminal(
+							item.path,
+							"claude --dangerously-skip-permissions",
+						);
+					} else if (choice === "copilot") {
+						window.api.openInTerminal(
+							item.path,
+							"copilot --yolo",
+						);
+					}
+				}}
+			>
+				<Robot size={12} weight="bold" />
 			</button>
 			{ENABLE_GRAPH_TILES && (
 				<button

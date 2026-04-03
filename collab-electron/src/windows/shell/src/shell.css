@@ -991,6 +991,12 @@ body.platform-win {
 	cursor: grabbing !important;
 }
 
+/* click-to-pan: panning class without space-held */
+#panel-viewer.panning,
+#panel-viewer.panning * {
+	cursor: grabbing !important;
+}
+
 /* Resize handles */
 .tile-resize-handle {
 	position: absolute;

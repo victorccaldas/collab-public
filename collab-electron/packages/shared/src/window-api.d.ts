@@ -272,7 +272,7 @@ export interface CollabApi {
   offCdTo: (cb: CdToCb) => void;
 
   // Navigation
-  openInTerminal: (path: string) => void;
+  openInTerminal: (path: string, command?: string) => void;
   createGraphTile: (folderPath: string) => void;
   runInTerminal: (command: string) => void;
   onRunInTerminal: (cb: RunInTerminalCb) => void;

@@ -14,6 +14,23 @@ import { basename, dirname, extname, join } from "node:path";
 import { isSubpath } from "@collab/shared/path-utils";
 import { type FileFilter, isImageFile } from "./file-filter";
 
+/** Check if a Dirent is (or points to) a directory, following symlinks. */
+async function isEffectiveDirectory(
+  dirPath: string,
+  entry: Dirent,
+): Promise<boolean> {
+  if (entry.isDirectory()) return true;
+  if (entry.isSymbolicLink()) {
+    try {
+      const s = await stat(join(dirPath, entry.name)); // stat follows symlinks
+      return s.isDirectory();
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
 export interface DirEntry {
   name: string;
   isDirectory: boolean;
@@ -111,16 +128,20 @@ export async function fsReadDir(
   }
   return Promise.all(
     filtered.map(async (e) => {
+      const isDir = await isEffectiveDirectory(dirPath, e);
+      const isSymlink = e.isSymbolicLink();
       let createdAt = "";
       let modifiedAt = "";
       let fileCount: number | undefined;
-      if (e.isFile()) {
+      if (!isDir) {
         try {
           const s = await stat(join(dirPath, e.name));
           createdAt = s.birthtime.toISOString();
           modifiedAt = s.mtime.toISOString();
         } catch {}
-      } else if (e.isDirectory()) {
+      } else if (!isSymlink) {
+        // Skip recursive file counting for symlinked dirs to avoid
+        // traversing potentially huge external trees.
         try {
           fileCount = await countTreeFiles(
             join(dirPath, e.name),
@@ -131,8 +152,8 @@ export async function fsReadDir(
       }
       const entry: DirEntry = {
         name: e.name,
-        isDirectory: e.isDirectory(),
-        isFile: e.isFile(),
+        isDirectory: isDir,
+        isFile: !isDir,
         isSymlink: e.isSymbolicLink(),
         createdAt,
         modifiedAt,

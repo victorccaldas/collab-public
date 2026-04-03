@@ -257,10 +257,25 @@ const SHORTCUTS: { label: string; keys: string }[] = [
   },
 ];
 
-const MOUSE_INPUTS: { label: string; keys: string }[] = [
+type CanvasBindings = "click-to-pan" | "classic";
+
+const MOUSE_INPUTS_CLICK_TO_PAN: { label: string; keys: string }[] = [
+  { label: "Pan Canvas", keys: "Click + Drag" },
+  { label: "Pan Canvas", keys: "Middle Click + Drag" },
+  { label: "Marquee Select", keys: `${CTRL} Click + Drag` },
+  { label: "Scroll Canvas Vertically", keys: "Scroll" },
+  { label: "Scroll Canvas Horizontally", keys: `${SHIFT} Scroll` },
+  { label: "Zoom", keys: `${CTRL} Scroll` },
+  ...(IS_MAC
+    ? [{ label: "Zoom", keys: `${MOD} Scroll` }]
+    : []),
+];
+
+const MOUSE_INPUTS_CLASSIC: { label: string; keys: string }[] = [
   { label: "Pan Canvas", keys: "Two-Finger Swipe" },
   { label: "Pan Canvas", keys: "Middle Click + Drag" },
   { label: "Pan Canvas", keys: "Space + Drag" },
+  { label: "Marquee Select", keys: "Click + Drag" },
   { label: "Scroll Canvas Vertically", keys: "Scroll" },
   { label: "Scroll Canvas Horizontally", keys: `${SHIFT} Scroll` },
   { label: "Zoom", keys: `${CTRL} Scroll` },
@@ -481,18 +496,73 @@ function TerminalPane() {
   return IS_MAC ? <MacTerminalPane /> : <WindowsTerminalPane />;
 }
 
+const CANVAS_BINDING_OPTIONS: {
+  value: CanvasBindings;
+  label: string;
+  description: string;
+}[] = [
+  {
+    value: "click-to-pan",
+    label: "Click to pan",
+    description: "Click + drag to pan. Ctrl + drag to select.",
+  },
+  {
+    value: "classic",
+    label: "Classic",
+    description: "Space + drag to pan. Click + drag to select.",
+  },
+];
+
 function ControlsPane() {
+  const [bindings, setBindings] = useState<CanvasBindings>("click-to-pan");
+
+  useEffect(() => {
+    api.getPref("canvasBindings")
+      .then((v) => {
+        if (v === "classic" || v === "click-to-pan") setBindings(v);
+      })
+      .catch(() => { });
+  }, []);
+
+  async function handleBindingsChange(value: CanvasBindings) {
+    setBindings(value);
+    await api.setPref("canvasBindings", value);
+  }
+
+  const mouseInputs = bindings === "click-to-pan"
+    ? MOUSE_INPUTS_CLICK_TO_PAN
+    : MOUSE_INPUTS_CLASSIC;
+
   return (
     <div className="space-y-6 p-6">
       <div className="space-y-1">
-        <h2 className="text-base font-semibold">Keyboard Shortcuts</h2>
+        <h2 className="text-base font-semibold">Canvas Interaction</h2>
+        <p className="text-sm text-muted-foreground">
+          Choose how click and drag behaves on the canvas.
+        </p>
       </div>
-      <ShortcutList items={SHORTCUTS} />
+
+      <div className="space-y-1.5">
+        {CANVAS_BINDING_OPTIONS.map(({ value, label, description }) => (
+          <RadioOption
+            key={value}
+            selected={bindings === value}
+            onClick={() => { void handleBindingsChange(value); }}
+            label={label}
+            description={description}
+          />
+        ))}
+      </div>
 
       <div className="space-y-1 pt-2">
         <h2 className="text-base font-semibold">Mouse Controls</h2>
       </div>
-      <ShortcutList items={MOUSE_INPUTS} />
+      <ShortcutList items={mouseInputs} />
+
+      <div className="space-y-1 pt-2">
+        <h2 className="text-base font-semibold">Keyboard Shortcuts</h2>
+      </div>
+      <ShortcutList items={SHORTCUTS} />
     </div>
   );
 }

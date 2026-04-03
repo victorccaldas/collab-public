@@ -97,12 +97,13 @@ export function registerKnowledgeHandlers(
 
   ipcMain.on(
     "nav:open-in-terminal",
-    (_event, path: string) => {
+    (_event, path: string, command?: string) => {
       ctx.trackEvent("file_opened_in_terminal");
       ctx.forwardToWebview(
         "canvas",
         "open-terminal",
         path,
+        command,
       );
     },
   );
