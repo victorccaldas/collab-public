@@ -11,6 +11,10 @@ interface TerminalEntry {
   tileId: string;
 }
 
+function isOrphan(entry: TerminalEntry): boolean {
+  return entry.tileId.startsWith("orphan:");
+}
+
 function isIdle(entry: TerminalEntry): boolean {
   if (!entry.foreground) return true;
   const foreground = normalizeCommandName(entry.foreground);
@@ -84,6 +88,18 @@ function App() {
                 : e,
             ),
           );
+        } else if (channel === "terminal-list:adopted") {
+          const payload = args[0] as {
+            oldTileId: string;
+            entry: TerminalEntry;
+          };
+          if (isTerminalEntry(payload?.entry)) {
+            setEntries((prev) =>
+              prev.map((e) =>
+                e.tileId === payload.oldTileId ? payload.entry : e,
+              ),
+            );
+          }
         } else if (channel === "pty-exit") {
           const payload = args[0] as { sessionId: string };
           setEntries((prev) =>
@@ -96,9 +112,13 @@ function App() {
     return cleanup;
   }, []);
 
-  function peekTile(sessionId: string) {
-    setFocusedSessionId(sessionId);
-    window.api.sendToHost("terminal-list:peek-tile", sessionId);
+  function peekTile(entry: TerminalEntry) {
+    if (isOrphan(entry)) {
+      window.api.sendToHost("terminal-list:adopt", entry.sessionId);
+      return;
+    }
+    setFocusedSessionId(entry.sessionId);
+    window.api.sendToHost("terminal-list:peek-tile", entry.sessionId);
   }
 
   useEffect(() => {
@@ -117,7 +137,7 @@ function App() {
           ? 0
           : (currentIdx + dir + entries.length) % entries.length;
 
-      peekTile(entries[nextIdx].sessionId);
+      peekTile(entries[nextIdx]);
     }
 
     document.addEventListener("keydown", handleKeyDown);
@@ -128,9 +148,10 @@ function App() {
     <div className="terminal-list">
       <div className="terminal-list-header">Terminals</div>
       {entries.map((entry) => {
+        const orphan = isOrphan(entry);
         const idle = isIdle(entry);
         const focused = entry.sessionId === focusedSessionId;
-        const stateClass = idle ? "idle" : "busy";
+        const stateClass = orphan ? "orphan" : (idle ? "idle" : "busy");
         const classes = [
           "terminal-entry",
           stateClass,
@@ -143,7 +164,8 @@ function App() {
           <div
             key={entry.tileId}
             className={classes}
-            onClick={() => peekTile(entry.sessionId)}
+            title={orphan ? "Click to open on canvas" : undefined}
+            onClick={() => peekTile(entry)}
           >
             <div className={`status-dot ${stateClass}`} />
             <div className="entry-info">
@@ -152,9 +174,11 @@ function App() {
                   {entry.displayName}
                 </span>
                 <span className="status-label">
-                  {idle
-                    ? "idle"
-                    : entry.foreground || "running"}
+                  {orphan
+                    ? "detached"
+                    : idle
+                      ? "idle"
+                      : entry.foreground || "running"}
                 </span>
               </div>
               <div className="entry-cwd">

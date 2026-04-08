@@ -4,7 +4,7 @@ import {
   Menu,
   Notification,
   shell,
-  type BrowserWindow,
+  BrowserWindow,
 } from "electron";
 import * as gitReplay from "./git-replay";
 import { importWebArticle } from "./import-service";
@@ -95,6 +95,106 @@ export function registerMiscHandlers(
         buttons: opts.buttons ?? ["OK", "Cancel"],
       });
       return result.response;
+    },
+  );
+
+  // Dialog: text input (replaces window.prompt which is blocked in sandboxed webviews)
+  ipcMain.handle(
+    "dialog:input",
+    async (
+      _event,
+      opts: {
+        title?: string;
+        label?: string;
+        defaultValue?: string;
+      },
+    ) => {
+      const parent = ctx.mainWindow();
+      if (!parent) return null;
+
+      return new Promise<string | null>((resolve) => {
+        const win = new BrowserWindow({
+          parent,
+          modal: true,
+          width: 480,
+          height: 180,
+          resizable: false,
+          minimizable: false,
+          maximizable: false,
+          show: false,
+          frame: false,
+          webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: true,
+          },
+        });
+
+        const title = opts.title ?? "Input";
+        const label = opts.label ?? "";
+        const defaultValue = (opts.defaultValue ?? "").replace(/"/g, "&quot;");
+
+        const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  padding: 16px; background: #1e1e1e; color: #ccc; display: flex; flex-direction: column; height: 100vh; }
+h3 { font-size: 13px; margin-bottom: 8px; color: #eee; }
+label { font-size: 12px; margin-bottom: 6px; display: block; }
+input { width: 100%; padding: 6px 8px; font-size: 13px; border: 1px solid #555; border-radius: 4px;
+  background: #2d2d2d; color: #eee; outline: none; }
+input:focus { border-color: #007acc; }
+.buttons { margin-top: auto; display: flex; justify-content: flex-end; gap: 8px; }
+button { padding: 5px 14px; font-size: 12px; border: 1px solid #555; border-radius: 4px;
+  background: #333; color: #ccc; cursor: pointer; }
+button:hover { background: #444; }
+button.primary { background: #007acc; border-color: #007acc; color: #fff; }
+button.primary:hover { background: #0098ff; }
+</style></head><body>
+<h3>${title}</h3>
+${label ? `<label>${label}</label>` : ""}
+<input id="val" type="text" value="${defaultValue}" autofocus />
+<div class="buttons">
+  <button onclick="close_cancel()">Cancel</button>
+  <button class="primary" onclick="close_ok()">OK</button>
+</div>
+<script>
+const inp = document.getElementById("val");
+inp.select();
+inp.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") close_ok();
+  if (e.key === "Escape") close_cancel();
+});
+function close_ok() {
+  document.title = "OK:" + inp.value;
+}
+function close_cancel() {
+  document.title = "CANCEL";
+}
+</script></body></html>`;
+
+        win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+
+        let resolved = false;
+        win.webContents.on("page-title-updated", (_ev, newTitle) => {
+          if (resolved) return;
+          resolved = true;
+          if (newTitle.startsWith("OK:")) {
+            resolve(newTitle.slice(3));
+          } else {
+            resolve(null);
+          }
+          win.close();
+        });
+
+        win.on("closed", () => {
+          if (!resolved) {
+            resolved = true;
+            resolve(null);
+          }
+        });
+
+        win.once("ready-to-show", () => win.show());
+      });
     },
   );
 

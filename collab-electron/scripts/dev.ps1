@@ -18,5 +18,8 @@ Get-Process -Name electron-vite -ErrorAction SilentlyContinue |
 
 Start-Sleep -Milliseconds 500
 
+# Raise V8 heap limit for the dev server / Electron main process
+$env:NODE_OPTIONS = "--max-old-space-size=12288"
+
 & $electronVitePath dev
 exit $LASTEXITCODE

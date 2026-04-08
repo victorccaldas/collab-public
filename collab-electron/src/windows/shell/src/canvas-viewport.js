@@ -1,5 +1,5 @@
-const ZOOM_MIN = 0.33;
-const ZOOM_MAX = 1;
+const ZOOM_MIN = 0.20;
+const ZOOM_MAX = 1.5;
 const ZOOM_RUBBER_BAND_K = 400;
 const CELL = 20;
 const MAJOR = 80;
@@ -14,7 +14,12 @@ function isDark() {
 	return document.documentElement.classList.contains("dark");
 }
 
-export function createViewport(canvasEl, gridCanvas) {
+/**
+ * @param {HTMLElement} canvasEl
+ * @param {HTMLCanvasElement} gridCanvas
+ * @param {{ getWheelAction?: (e: WheelEvent) => "zoom" | "hscroll" | "pan" }} [opts]
+ */
+export function createViewport(canvasEl, gridCanvas, opts = {}) {
 	const gridCtx = gridCanvas.getContext("2d");
 	let state = null;
 	let onUpdate = null;
@@ -47,32 +52,38 @@ export function createViewport(canvasEl, gridCanvas) {
 
 		const step = CELL * state.zoom;
 		const majorStep = MAJOR * state.zoom;
-		const offX = ((state.panX % majorStep) + majorStep) % majorStep;
-		const offY = ((state.panY % majorStep) + majorStep) % majorStep;
 
-		const dotOffX = ((state.panX % step) + step) % step;
-		const dotOffY = ((state.panY % step) + step) % step;
-		const dotSize = Math.max(1, 1.5 * state.zoom);
-		gridCtx.fillStyle = dark
-			? "rgba(255,255,255,0.15)"
-			: "rgba(0,0,0,0.25)";
-		for (let x = dotOffX; x <= w; x += step) {
-			for (let y = dotOffY; y <= h; y += step) {
-				const px = Math.round(x);
-				const py = Math.round(y);
-				gridCtx.fillRect(px, py, dotSize, dotSize);
+		// Draw minor dots only when spacing is large enough (≥5px) to be
+		// visually distinct. Below that threshold the dots merge into noise
+		// and the hundreds-of-thousands of fillRect calls tank performance.
+		if (step >= 5) {
+			const dotOffX = ((state.panX % step) + step) % step;
+			const dotOffY = ((state.panY % step) + step) % step;
+			const dotSize = Math.max(1, 1.5 * state.zoom);
+			gridCtx.fillStyle = dark
+				? "rgba(255,255,255,0.15)"
+				: "rgba(0,0,0,0.25)";
+			for (let x = dotOffX; x <= w; x += step) {
+				for (let y = dotOffY; y <= h; y += step) {
+					gridCtx.fillRect(x | 0, y | 0, dotSize, dotSize);
+				}
 			}
 		}
 
-		const majorDotSize = Math.max(1, 1.5 * state.zoom);
-		gridCtx.fillStyle = dark
-			? "rgba(255,255,255,0.25)"
-			: "rgba(0,0,0,0.40)";
-		for (let x = offX; x <= w; x += majorStep) {
-			for (let y = offY; y <= h; y += majorStep) {
-				const px = Math.round(x);
-				const py = Math.round(y);
-				gridCtx.fillRect(px, py, majorDotSize, majorDotSize);
+		// Major dots — skip when spacing is too small (can happen during
+		// rubber-band overshoot where zoom temporarily dips far below min).
+		// Without this guard the nested loop can hit millions of iterations.
+		if (majorStep >= 4) {
+			const offX = ((state.panX % majorStep) + majorStep) % majorStep;
+			const offY = ((state.panY % majorStep) + majorStep) % majorStep;
+			const majorDotSize = Math.max(1, 1.5 * state.zoom);
+			gridCtx.fillStyle = dark
+				? "rgba(255,255,255,0.25)"
+				: "rgba(0,0,0,0.40)";
+			for (let x = offX; x <= w; x += majorStep) {
+				for (let y = offY; y <= h; y += majorStep) {
+					gridCtx.fillRect(x | 0, y | 0, majorDotSize, majorDotSize);
+				}
 			}
 		}
 	}
@@ -165,10 +176,18 @@ export function createViewport(canvasEl, gridCanvas) {
 	canvasEl.addEventListener("wheel", (e) => {
 		e.preventDefault();
 
-		if (shouldZoom(e)) {
+		const action = opts.getWheelAction
+			? opts.getWheelAction(e)
+			: (e.shiftKey ? "hscroll" : (shouldZoom(e) || (!e.deltaX && e.deltaY) ? "zoom" : "pan"));
+
+		if (action === "hscroll") {
+			state.panX -= (e.deltaY || e.deltaX) * 1.2;
+			updateCanvas();
+		} else if (action === "zoom") {
 			const rect = canvasEl.getBoundingClientRect();
 			applyZoom(e.deltaY, e.clientX - rect.left, e.clientY - rect.top);
 		} else {
+			// Two-finger / trackpad pan
 			state.panX -= e.deltaX * 1.2;
 			state.panY -= e.deltaY * 1.2;
 			updateCanvas();

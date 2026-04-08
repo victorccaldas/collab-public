@@ -137,7 +137,7 @@ export function attachDrag(titleBar, tile, {
  * @param {(ids: Set<string>) => void} opts.onSelectionChange
  * @param {() => boolean} opts.isShiftHeld
  * @param {() => boolean} opts.isSpaceHeld
- * @param {() => string} opts.getCanvasBindings
+ * @param {(e: MouseEvent) => boolean} opts.shouldStartMarquee
  * @param {() => Array<{webview: HTMLElement}>} opts.getAllWebviews
  */
 export function attachMarquee(canvasEl, {
@@ -146,7 +146,7 @@ export function attachMarquee(canvasEl, {
   onSelectionChange,
   isShiftHeld,
   isSpaceHeld,
-  getCanvasBindings,
+  shouldStartMarquee,
   getAllWebviews,
 }) {
   const tileLayer = canvasEl.querySelector("#tile-layer");
@@ -163,11 +163,7 @@ export function attachMarquee(canvasEl, {
       e.target !== gridCanvas
     ) return;
 
-    const mode = getCanvasBindings?.() ?? "classic";
-    if (mode === "click-to-pan") {
-      // In click-to-pan mode, marquee requires Ctrl (or Meta on Mac)
-      if (!e.ctrlKey && !e.metaKey) return;
-    }
+    if (shouldStartMarquee && !shouldStartMarquee(e)) return;
 
     e.preventDefault();
     if (document.activeElement) document.activeElement.blur();

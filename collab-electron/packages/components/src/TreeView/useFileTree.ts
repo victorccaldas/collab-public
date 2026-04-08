@@ -150,8 +150,24 @@ export function useFileTree(
 					Array.isArray(stored) &&
 					stored.length > 0
 				) {
+					// Filter out stale paths that no longer
+					// belong to any current workspace root.
+					const roots = folders.map(
+						(f) => f.path,
+					);
+					const valid = new Set<string>();
+					for (const p of stored as string[]) {
+						for (const root of roots) {
+							if (isSubpath(root, p)) {
+								valid.add(p);
+								break;
+							}
+						}
+					}
 					setExpanded(
-						new Set(stored as string[]),
+						valid.size > 0
+							? valid
+							: new Set(roots),
 					);
 				} else {
 					setExpanded(

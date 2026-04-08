@@ -1,17 +1,17 @@
 // src/main/sidecar/protocol.ts
 import { join } from "node:path";
-import { COLLAB_DIR } from "../paths";
-import { makeEndpointPath } from "../ipc-endpoint";
+import { COLLAB_SHARED_DIR } from "../paths";
+import { makeSharedEndpointPath } from "../ipc-endpoint";
 
 export const SIDECAR_VERSION = 1;
 
-export const SIDECAR_SOCKET_PATH = makeEndpointPath("pty-sidecar");
-export const SIDECAR_PID_PATH = join(COLLAB_DIR, "pty-sidecar.pid");
-export const SESSION_SOCKET_DIR = join(COLLAB_DIR, "pty-sessions");
+export const SIDECAR_SOCKET_PATH = makeSharedEndpointPath("pty-sidecar");
+export const SIDECAR_PID_PATH = join(COLLAB_SHARED_DIR, "pty-sidecar.pid");
+export const SESSION_SOCKET_DIR = join(COLLAB_SHARED_DIR, "pty-sessions");
 
 export function sessionSocketPath(sessionId: string): string {
   if (process.platform === "win32") {
-    return makeEndpointPath(`pty-session-${sessionId}`);
+    return makeSharedEndpointPath(`pty-session-${sessionId}`);
   }
   return join(SESSION_SOCKET_DIR, `${sessionId}.sock`);
 }
@@ -19,8 +19,10 @@ export function sessionSocketPath(sessionId: string): string {
 // Ring buffer default: 8 MB per session
 export const DEFAULT_RING_BUFFER_BYTES = 8 * 1024 * 1024;
 
-// Idle timeout: 30 minutes with no sessions and no clients
-export const IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+// Idle timeout: disabled — sidecar stays alive indefinitely so
+// terminal sessions survive across Collaborator restarts and
+// dev/production mode switches.
+export const IDLE_TIMEOUT_MS = 0;
 
 // JSON-RPC 2.0 types
 export interface JsonRpcRequest {

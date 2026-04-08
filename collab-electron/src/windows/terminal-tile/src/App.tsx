@@ -30,6 +30,7 @@ function App() {
     );
     const existingSessionId = params.get("sessionId");
     const isRestored = params.get("restored") === "1";
+    const isAdoptOnly = params.get("adoptOnly") === "1";
     const cwd = params.get("cwd") || undefined;
     const tileId = params.get("tileId") || undefined;
 
@@ -80,6 +81,14 @@ function App() {
           setSessionId(existingSessionId);
         })
         .catch(async () => {
+          // If this is an adopt-only tile (orphan adoption from the
+          // terminal list), don't create a fresh session — just show
+          // the session as ended so no ghost sessions are spawned.
+          if (isAdoptOnly) {
+            setRestored(false);
+            setExited(true);
+            return;
+          }
           setRestored(false);
           // Recover the original working directory from session
           // metadata so the fallback session opens in the right place.

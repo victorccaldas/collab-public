@@ -14,9 +14,15 @@ import { createCanvasRpc } from "./canvas-rpc.js";
 import { createTileManager } from "./tile-manager.js";
 import { updateTileTitle } from "./tile-renderer.js";
 import { normalizeCommandName } from "@collab/shared/path-utils";
+import {
+	mergeWithDefaults,
+	matchesMouseCombo,
+	matchesWheelCombo,
+} from "@collab/shared/keybindings";
 
 const CANVAS_DBLCLICK_SUPPRESS_MS = 500;
 const IS_WINDOWS = window.shellApi.getPlatform() === "win32";
+const PLATFORM = window.shellApi.getPlatform();
 
 const viewportState = { panX: 0, panY: 0, zoom: 1 };
 
@@ -41,8 +47,10 @@ window.shellApi.getPref("canvasOpacity").then((v) => {
 	broadcastCanvasOpacity();
 });
 
-window.shellApi.getPref("canvasBindings").then((v) => {
-	if (v === "classic" || v === "click-to-pan") canvasBindings = v;
+let activeBindings = mergeWithDefaults({});
+
+window.shellApi.getPref("keybindings").then((v) => {
+	activeBindings = mergeWithDefaults(v ?? {});
 });
 
 window.shellApi.onPrefChanged((key, value) => {
@@ -50,16 +58,30 @@ window.shellApi.onPrefChanged((key, value) => {
 		lastCanvasOpacity = value;
 		applyCanvasOpacity(value);
 		broadcastCanvasOpacity();
-	} else if (key === "canvasBindings") {
-		if (value === "classic" || value === "click-to-pan") {
-			canvasBindings = value;
-		}
+	} else if (key === "keybindings") {
+		activeBindings = mergeWithDefaults(value ?? {});
 	}
 });
 
 // -- Viewport --
 
-const viewport = createViewport(canvasEl, gridCanvas);
+const viewport = createViewport(canvasEl, gridCanvas, {
+	getWheelAction(e) {
+		const zoom = activeBindings["canvas-zoom"];
+		if (zoom?.type === "wheel" && matchesWheelCombo(e, zoom.combo, PLATFORM)) {
+			return "zoom";
+		}
+		const hscroll = activeBindings["canvas-hscroll"];
+		if (hscroll?.type === "wheel" && matchesWheelCombo(e, hscroll.combo, PLATFORM)) {
+			return "hscroll";
+		}
+		// Default: plain wheel with no deltaX = zoom, otherwise trackpad pan
+		if (!e.deltaX && e.deltaY && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+			return "zoom";
+		}
+		return "pan";
+	},
+});
 
 /** Convert in-memory panX/panY state to a center-point for persistence. */
 function toCenterPointState(state) {
@@ -137,7 +159,6 @@ async function init() {
 	let shiftHeld = false;
 	let spaceHeld = false;
 	let isPanning = false;
-	let canvasBindings = "click-to-pan"; // "click-to-pan" | "classic"
 	let suppressCanvasDblClickUntil = 0;
 
 	// -- Drag-and-drop handler (shared with webviews) --
@@ -640,7 +661,13 @@ async function init() {
 		},
 		isShiftHeld: () => shiftHeld,
 		isSpaceHeld: () => spaceHeld,
-		getCanvasBindings: () => canvasBindings,
+		shouldStartMarquee: (e) => {
+			const binding = activeBindings["canvas-marquee"];
+			if (!binding || binding.type !== "mouse") return true;
+			const holdKeys = new Set();
+			if (spaceHeld) holdKeys.add("Space");
+			return matchesMouseCombo(e, binding.combo, holdKeys, PLATFORM);
+		},
 		getAllWebviews,
 	});
 
@@ -734,19 +761,19 @@ async function init() {
 	});
 
 	canvasEl.addEventListener("mousedown", (e) => {
-		// Middle-click always pans. Left-click depends on binding mode.
+		// Check if this mousedown matches the pan binding
+		const holdKeys = new Set();
+		if (spaceHeld) holdKeys.add("Space");
+		const panBinding = activeBindings["canvas-pan"];
+		const isPanMatch = panBinding?.type === "mouse" &&
+			matchesMouseCombo(e, panBinding.combo, holdKeys, PLATFORM);
 		const isMiddle = e.button === 1;
-		const isLeftPan = e.button === 0 && (
-			canvasBindings === "click-to-pan"
-				? !e.ctrlKey && !e.metaKey  // plain click = pan; ctrl+click = marquee
-				: spaceHeld                  // classic: space+click = pan
-		);
 		// Only pan if clicking on the canvas background (not on a tile)
 		const onBackground =
 			e.target === canvasEl ||
 			e.target === document.getElementById("tile-layer") ||
 			e.target === document.getElementById("grid-canvas");
-		const shouldPan = (isMiddle || (isLeftPan && onBackground));
+		const shouldPan = isMiddle || (isPanMatch && onBackground);
 		if (!shouldPan) return;
 
 		e.preventDefault();
@@ -861,22 +888,10 @@ async function init() {
 
 	window.shellApi.onShortcut(handleShortcut);
 
-	window.addEventListener("keydown", (event) => {
-		if (!isFocusSearchShortcut(event)) return;
-		event.preventDefault();
-		handleShortcut("focus-search");
-	});
-
-	window.addEventListener("keydown", (event) => {
-		if (!event.metaKey || event.shiftKey || event.altKey) return;
-		if (event.key === "n") {
-			event.preventDefault();
-			handleShortcut("new-tile");
-		} else if (event.key === "w") {
-			event.preventDefault();
-			handleShortcut("close-tile");
-		}
-	});
+	// Note: keyboard shortcuts (Cmd+K, Cmd+N, Cmd+W, etc.) are handled
+	// dynamically by the main process via before-input-event and
+	// dispatched to handleShortcut through the onShortcut IPC channel.
+	// No hardcoded keydown listeners needed here.
 
 	// -- Browser tile Cmd+L focus URL --
 
@@ -1042,11 +1057,35 @@ async function init() {
 
 	// -- Terminal list init + click-to-focus --
 
+	function adoptOrphanSession(sessionId, meta) {
+		const rect = canvasEl.getBoundingClientRect();
+		const cx =
+			(rect.width / 2 - viewportState.panX) /
+			viewportState.zoom;
+		const cy =
+			(rect.height / 2 - viewportState.panY) /
+			viewportState.zoom;
+		const tile = tileManager.createCanvasTile(
+			"term", cx, cy, { ptySessionId: sessionId },
+		);
+		syncTerminalTileMeta(tile, meta);
+		tileManager.spawnTerminalWebview(tile, true, { adoptOnly: true });
+		const entry = buildTerminalListEntry(tile, meta);
+		if (entry) {
+			terminalListWebview.send("terminal-list:adopted", {
+				oldTileId: `orphan:${sessionId}`,
+				entry,
+			});
+		}
+	}
+
 	terminalListWebview.webview.addEventListener(
 		"dom-ready", async () => {
 			const discovered =
 				await window.shellApi.ptyDiscover?.() ?? [];
 			const initEntries = [];
+			const tiledSessionIds = new Set();
+
 			for (const [id] of tileManager.getTileDOMs()) {
 				const tile = getTile(id);
 				if (tile?.type === "term" && tile.ptySessionId) {
@@ -1056,12 +1095,28 @@ async function init() {
 					if (!disc) {
 						continue;
 					}
+					tiledSessionIds.add(tile.ptySessionId);
 					syncTerminalTileMeta(tile, disc.meta);
 					const entry = buildTerminalListEntry(tile, disc.meta);
 					if (entry) {
 						initEntries.push(entry);
 					}
 				}
+			}
+
+			// Add orphaned sessions (discovered but no canvas tile)
+			for (const disc of discovered) {
+				if (tiledSessionIds.has(disc.sessionId)) continue;
+				initEntries.push({
+					sessionId: disc.sessionId,
+					displayName: disc.meta.displayName || "Terminal",
+					commandName: normalizeCommandName(
+						disc.meta.command || disc.meta.shell || "shell",
+					) || "shell",
+					cwd: disc.meta.cwdHostPath || disc.meta.cwd || "~",
+					foreground: null,
+					tileId: `orphan:${disc.sessionId}`,
+				});
 			}
 
 			terminalListWebview.send(
@@ -1080,7 +1135,7 @@ async function init() {
 	);
 
 	terminalListWebview.webview.addEventListener(
-		"ipc-message", (event) => {
+		"ipc-message", async (event) => {
 			if (event.channel === "terminal-list:peek-tile") {
 				const sessionId = event.args[0];
 				for (const [id] of tileManager.getTileDOMs()) {
@@ -1092,6 +1147,16 @@ async function init() {
 						edgeIndicators.panToTile(tile);
 						break;
 					}
+				}
+			} else if (event.channel === "terminal-list:adopt") {
+				const sessionId = event.args[0];
+				const discovered =
+					await window.shellApi.ptyDiscover?.() ?? [];
+				const disc = discovered.find(
+					(d) => d.sessionId === sessionId,
+				);
+				if (disc) {
+					adoptOrphanSession(sessionId, disc.meta);
 				}
 			}
 		},

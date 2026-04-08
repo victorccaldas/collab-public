@@ -8,7 +8,19 @@ import {
   Moon,
   Monitor,
   Terminal,
+  ArrowCounterClockwise,
 } from "@phosphor-icons/react";
+import {
+  type BindingsMap,
+  type BindingDescriptor,
+  type KeyCombo,
+  ALL_ACTIONS,
+  DEFAULT_KEYBINDINGS,
+  CLASSIC_OVERRIDES,
+  mergeWithDefaults,
+  comboToDisplayString,
+  recordKeyCombo,
+} from "@collab/shared/keybindings";
 
 type ThemeMode = "light" | "dark" | "system";
 
@@ -243,11 +255,6 @@ const SHIFT = IS_MAC ? "\u21E7" : "Shift+";
 const CTRL = IS_MAC ? "\u2303" : "Ctrl+";
 
 const SHORTCUTS: { label: string; keys: string }[] = [
-  { label: "Settings", keys: `${MOD} ,` },
-  { label: "Find", keys: `${MOD} K` },
-  { label: "Toggle Navigator", keys: `${MOD} \\` },
-  { label: "Toggle Terminal List", keys: `${MOD} \`` },
-  { label: "Open Workspace", keys: `${SHIFT} ${MOD} O` },
   { label: "Zoom In", keys: `${MOD} =` },
   { label: "Zoom Out", keys: `${MOD} -` },
   { label: "Actual Size", keys: `${MOD} 0` },
@@ -257,32 +264,7 @@ const SHORTCUTS: { label: string; keys: string }[] = [
   },
 ];
 
-type CanvasBindings = "click-to-pan" | "classic";
-
-const MOUSE_INPUTS_CLICK_TO_PAN: { label: string; keys: string }[] = [
-  { label: "Pan Canvas", keys: "Click + Drag" },
-  { label: "Pan Canvas", keys: "Middle Click + Drag" },
-  { label: "Marquee Select", keys: `${CTRL} Click + Drag` },
-  { label: "Scroll Canvas Vertically", keys: "Scroll" },
-  { label: "Scroll Canvas Horizontally", keys: `${SHIFT} Scroll` },
-  { label: "Zoom", keys: `${CTRL} Scroll` },
-  ...(IS_MAC
-    ? [{ label: "Zoom", keys: `${MOD} Scroll` }]
-    : []),
-];
-
-const MOUSE_INPUTS_CLASSIC: { label: string; keys: string }[] = [
-  { label: "Pan Canvas", keys: "Two-Finger Swipe" },
-  { label: "Pan Canvas", keys: "Middle Click + Drag" },
-  { label: "Pan Canvas", keys: "Space + Drag" },
-  { label: "Marquee Select", keys: "Click + Drag" },
-  { label: "Scroll Canvas Vertically", keys: "Scroll" },
-  { label: "Scroll Canvas Horizontally", keys: `${SHIFT} Scroll` },
-  { label: "Zoom", keys: `${CTRL} Scroll` },
-  ...(IS_MAC
-    ? [{ label: "Zoom", keys: `${MOD} Scroll` }]
-    : []),
-];
+const SETTINGS_PLATFORM = IS_MAC ? "darwin" : "win32";
 
 function Kbd({ children }: { children: string }) {
   return (
@@ -496,8 +478,10 @@ function TerminalPane() {
   return IS_MAC ? <MacTerminalPane /> : <WindowsTerminalPane />;
 }
 
-const CANVAS_BINDING_OPTIONS: {
-  value: CanvasBindings;
+type CanvasPreset = "click-to-pan" | "classic" | "custom";
+
+const CANVAS_PRESET_OPTIONS: {
+  value: "click-to-pan" | "classic";
   label: string;
   description: string;
 }[] = [
@@ -513,56 +497,272 @@ const CANVAS_BINDING_OPTIONS: {
   },
 ];
 
-function ControlsPane() {
-  const [bindings, setBindings] = useState<CanvasBindings>("click-to-pan");
+function BindingRecorder({
+  actionId,
+  binding,
+  onRecord,
+}: {
+  actionId: string;
+  binding: BindingDescriptor;
+  onRecord: (actionId: string, newBinding: BindingDescriptor) => void;
+}) {
+  const [recording, setRecording] = useState(false);
+  const display = comboToDisplayString(binding, SETTINGS_PLATFORM);
 
   useEffect(() => {
-    api.getPref("canvasBindings")
+    if (!recording) return;
+
+    function onKeyDown(e: KeyboardEvent) {
+      // Ignore bare modifier presses
+      if (["Control", "Meta", "Shift", "Alt"].includes(e.key)) return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (e.key === "Escape") {
+        setRecording(false);
+        return;
+      }
+
+      const combo = recordKeyCombo(e, SETTINGS_PLATFORM);
+      onRecord(actionId, { type: "key", combo });
+      setRecording(false);
+    }
+
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [recording, actionId, onRecord]);
+
+  if (recording) {
+    return (
+      <span
+        className="inline-flex items-center rounded px-2 py-0.5 text-xs font-mono animate-pulse"
+        style={{
+          backgroundColor: "color-mix(in srgb, var(--foreground) 15%, transparent)",
+          color: "var(--foreground)",
+        }}
+      >
+        Press a key combo...
+      </span>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => setRecording(true)}
+      className="inline-flex items-center rounded px-1.5 py-0.5 text-xs font-mono cursor-pointer hover:opacity-80"
+      style={{
+        backgroundColor: "color-mix(in srgb, var(--foreground) 8%, transparent)",
+        color: "var(--foreground)",
+      }}
+      title="Click to rebind"
+    >
+      {display}
+    </button>
+  );
+}
+
+function ControlsPane() {
+  const [bindings, setBindings] = useState<BindingsMap>(() => mergeWithDefaults({}));
+  const [preset, setPreset] = useState<CanvasPreset>("click-to-pan");
+
+  useEffect(() => {
+    api.getPref("keybindings")
       .then((v) => {
-        if (v === "classic" || v === "click-to-pan") setBindings(v);
+        const merged = mergeWithDefaults(v as Partial<BindingsMap> | null);
+        setBindings(merged);
+        setPreset(detectPreset(merged));
       })
       .catch(() => { });
   }, []);
 
-  async function handleBindingsChange(value: CanvasBindings) {
-    setBindings(value);
-    await api.setPref("canvasBindings", value);
+  function detectPreset(b: BindingsMap): CanvasPreset {
+    const defPan = DEFAULT_KEYBINDINGS["canvas-pan"];
+    const defMarquee = DEFAULT_KEYBINDINGS["canvas-marquee"];
+    const classPan = CLASSIC_OVERRIDES["canvas-pan"];
+    const classMarquee = CLASSIC_OVERRIDES["canvas-marquee"];
+
+    if (JSON.stringify(b["canvas-pan"]) === JSON.stringify(defPan) &&
+        JSON.stringify(b["canvas-marquee"]) === JSON.stringify(defMarquee)) {
+      return "click-to-pan";
+    }
+    if (JSON.stringify(b["canvas-pan"]) === JSON.stringify(classPan) &&
+        JSON.stringify(b["canvas-marquee"]) === JSON.stringify(classMarquee)) {
+      return "classic";
+    }
+    return "custom";
   }
 
-  const mouseInputs = bindings === "click-to-pan"
-    ? MOUSE_INPUTS_CLICK_TO_PAN
-    : MOUSE_INPUTS_CLASSIC;
+  async function saveBindings(updated: BindingsMap) {
+    setBindings(updated);
+    setPreset(detectPreset(updated));
+    await api.setPref("keybindings", updated);
+  }
+
+  async function handleRecord(actionId: string, newBinding: BindingDescriptor) {
+    const updated = { ...bindings, [actionId]: newBinding };
+    await saveBindings(updated);
+  }
+
+  async function handlePresetChange(value: "click-to-pan" | "classic") {
+    const overrides = value === "classic" ? CLASSIC_OVERRIDES : {};
+    const updated = {
+      ...bindings,
+      "canvas-pan": DEFAULT_KEYBINDINGS["canvas-pan"],
+      "canvas-marquee": DEFAULT_KEYBINDINGS["canvas-marquee"],
+      ...overrides,
+    };
+    await saveBindings(updated);
+  }
+
+  async function resetToDefaults() {
+    const defaults = mergeWithDefaults({});
+    setBindings(defaults);
+    setPreset("click-to-pan");
+    await api.setPref("keybindings", defaults);
+  }
+
+  const keyboardActions = ALL_ACTIONS.filter(a => a.category === "keyboard");
+  const mouseActions = ALL_ACTIONS.filter(a => a.category === "mouse");
+  const wheelActions = ALL_ACTIONS.filter(a => a.category === "wheel");
 
   return (
     <div className="space-y-6 p-6">
+      {/* Canvas preset */}
       <div className="space-y-1">
         <h2 className="text-base font-semibold">Canvas Interaction</h2>
         <p className="text-sm text-muted-foreground">
-          Choose how click and drag behaves on the canvas.
+          Quick presets for canvas pan and select.
         </p>
       </div>
-
       <div className="space-y-1.5">
-        {CANVAS_BINDING_OPTIONS.map(({ value, label, description }) => (
+        {CANVAS_PRESET_OPTIONS.map(({ value, label, description }) => (
           <RadioOption
             key={value}
-            selected={bindings === value}
-            onClick={() => { void handleBindingsChange(value); }}
+            selected={preset === value}
+            onClick={() => { void handlePresetChange(value); }}
             label={label}
             description={description}
           />
         ))}
+        {preset === "custom" && (
+          <div
+            className="flex items-center rounded-md px-3 py-2.5"
+            style={{
+              border: "1px solid var(--foreground)",
+              backgroundColor: "color-mix(in srgb, var(--foreground) 6%, transparent)",
+            }}
+          >
+            <p className="text-sm font-medium">Custom</p>
+          </div>
+        )}
       </div>
 
+      {/* Keyboard shortcuts */}
+      <div className="space-y-1 pt-2">
+        <h2 className="text-base font-semibold">Keyboard Shortcuts</h2>
+        <p className="text-sm text-muted-foreground">
+          Click a binding to record a new key combo.
+        </p>
+      </div>
+      <div className="space-y-0">
+        {keyboardActions.map(({ id, label }) => {
+          const binding = bindings[id];
+          if (!binding) return null;
+          return (
+            <div
+              key={id}
+              className="flex items-center justify-between py-2"
+              style={{
+                borderBottom: "1px solid color-mix(in srgb, var(--foreground) 6%, transparent)",
+              }}
+            >
+              <span className="text-sm">{label}</span>
+              <BindingRecorder
+                actionId={id}
+                binding={binding}
+                onRecord={handleRecord}
+              />
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Mouse controls */}
       <div className="space-y-1 pt-2">
         <h2 className="text-base font-semibold">Mouse Controls</h2>
       </div>
-      <ShortcutList items={mouseInputs} />
+      <div className="space-y-0">
+        {mouseActions.map(({ id, label }) => {
+          const binding = bindings[id];
+          if (!binding) return null;
+          return (
+            <div
+              key={id}
+              className="flex items-center justify-between py-2"
+              style={{
+                borderBottom: "1px solid color-mix(in srgb, var(--foreground) 6%, transparent)",
+              }}
+            >
+              <span className="text-sm">{label}</span>
+              <Kbd>{comboToDisplayString(binding, SETTINGS_PLATFORM)}</Kbd>
+            </div>
+          );
+        })}
+        <div
+          className="flex items-center justify-between py-2"
+          style={{ borderBottom: "1px solid color-mix(in srgb, var(--foreground) 6%, transparent)" }}
+        >
+          <span className="text-sm">Pan Canvas</span>
+          <Kbd>Middle Click + Drag</Kbd>
+        </div>
+      </div>
 
+      {/* Wheel controls */}
       <div className="space-y-1 pt-2">
-        <h2 className="text-base font-semibold">Keyboard Shortcuts</h2>
+        <h2 className="text-base font-semibold">Scroll Controls</h2>
+      </div>
+      <div className="space-y-0">
+        {wheelActions.map(({ id, label }) => {
+          const binding = bindings[id];
+          if (!binding) return null;
+          return (
+            <div
+              key={id}
+              className="flex items-center justify-between py-2"
+              style={{
+                borderBottom: "1px solid color-mix(in srgb, var(--foreground) 6%, transparent)",
+              }}
+            >
+              <span className="text-sm">{label}</span>
+              <Kbd>{comboToDisplayString(binding, SETTINGS_PLATFORM)}</Kbd>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Non-customizable shortcuts (read-only) */}
+      <div className="space-y-1 pt-2">
+        <h2 className="text-base font-semibold">Other Shortcuts</h2>
+        <p className="text-sm text-muted-foreground">
+          These shortcuts are not customizable.
+        </p>
       </div>
       <ShortcutList items={SHORTCUTS} />
+
+      {/* Reset */}
+      <button
+        type="button"
+        onClick={() => { void resetToDefaults(); }}
+        className="flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium cursor-pointer"
+        style={{
+          backgroundColor: "color-mix(in srgb, var(--foreground) 8%, transparent)",
+          color: "var(--foreground)",
+        }}
+      >
+        <ArrowCounterClockwise className="h-4 w-4" />
+        Reset to defaults
+      </button>
     </div>
   );
 }

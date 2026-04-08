@@ -56,6 +56,27 @@ if (!process.env.LANG || !process.env.LANG.includes("UTF-8")) {
   process.env.LANG = "en_US.UTF-8";
 }
 
+// Raise V8 heap limits for the main process and renderer processes.
+// Each terminal webview is a separate renderer; heavy AI coding tools
+// (Claude, Copilot) generate large scrollback that can exhaust the
+// default ~1.4 GB heap.  Dev mode uses more memory (Vite HMR, longer
+// sessions) so we allow a larger heap there.
+//
+// If NODE_OPTIONS already specifies --max-old-space-size (e.g. from
+// dev.mjs / dev.ps1), honour that value instead of overriding it.
+const DEFAULT_HEAP_MB = 8192;
+const nodeOptsMatch = (process.env.NODE_OPTIONS ?? "").match(
+  /--max-old-space-size=(\d+)/,
+);
+const heapMB = nodeOptsMatch
+  ? Math.max(Number(nodeOptsMatch[1]), DEFAULT_HEAP_MB)
+  : DEFAULT_HEAP_MB;
+app.commandLine.appendSwitch("js-flags", `--max-old-space-size=${heapMB}`);
+
+// Raise the maximum number of renderer processes Chromium will keep alive.
+// Default is ~4 on some platforms; we need more for many terminal tiles.
+app.commandLine.appendSwitch("renderer-process-limit", "20");
+
 process.on("uncaughtException", (error) => {
   trackEvent("app_crash", {
     type: "uncaughtException",
@@ -164,64 +185,43 @@ function sendShortcut(action: string): void {
   mainWindow?.webContents.send("shell:shortcut", action);
 }
 
-const cmdOrCtrl = (input: Electron.Input): boolean =>
-  input.meta || input.control;
-const shiftCmdOrCtrl = (input: Electron.Input): boolean =>
-  input.shift && (input.meta || input.control);
-const ctrlOnly = (input: Electron.Input): boolean =>
-  input.control && !input.meta;
+import {
+  type BindingsMap,
+  DEFAULT_KEYBINDINGS,
+  mergeWithDefaults,
+  matchesKeyCombo,
+  comboToAccelerator,
+} from "@collab/shared/keybindings";
 
-interface ShortcutEntry {
-  modifier: (input: Electron.Input) => boolean;
-  action: string;
-}
+let activeBindings: BindingsMap = mergeWithDefaults(
+  getPref(config, "keybindings") as Partial<BindingsMap> | null ?? {},
+);
 
-const TOGGLE_SHORTCUTS: Record<string, ShortcutEntry> = {
-  Backslash: { modifier: cmdOrCtrl, action: "toggle-nav" },
-  Backquote: { modifier: cmdOrCtrl, action: "toggle-terminal-list" },
-  Comma: { modifier: cmdOrCtrl, action: "toggle-settings" },
-  KeyO: { modifier: shiftCmdOrCtrl, action: "add-workspace" },
-  KeyK: { modifier: cmdOrCtrl, action: "focus-search" },
-  KeyN: { modifier: cmdOrCtrl, action: "new-tile" },
-  KeyW: { modifier: cmdOrCtrl, action: "close-tile" },
-};
-
-const TOGGLE_SHORTCUT_KEYS: Record<string, ShortcutEntry> = {
-  "\\": TOGGLE_SHORTCUTS.Backslash!,
-  "`": TOGGLE_SHORTCUTS.Backquote!,
-  ",": TOGGLE_SHORTCUTS.Comma!,
-  o: TOGGLE_SHORTCUTS.KeyO!,
-  k: TOGGLE_SHORTCUTS.KeyK!,
-  n: TOGGLE_SHORTCUTS.KeyN!,
-  w: TOGGLE_SHORTCUTS.KeyW!,
-};
-
-function normalizeShortcutKey(key: string | undefined): string | null {
-  if (!key) return null;
-  return key.length === 1 ? key.toLowerCase() : key;
-}
-
-function resolveToggleShortcut(
-  input: Electron.Input,
-): ShortcutEntry | undefined {
-  const shortcut = TOGGLE_SHORTCUTS[input.code];
-  if (shortcut) return shortcut;
-  const normalizedKey = normalizeShortcutKey(input.key);
-  return normalizedKey
-    ? TOGGLE_SHORTCUT_KEYS[normalizedKey]
-    : undefined;
-}
+const SHORTCUT_ACTIONS = [
+  "toggle-nav", "toggle-terminal-list", "toggle-settings",
+  "add-workspace", "focus-search", "new-tile", "close-tile",
+];
 
 function attachShortcutListener(target: WebContents): void {
   target.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown") return;
 
-    const toggle = resolveToggleShortcut(input);
-    if (toggle && toggle.modifier(input)) {
-      event.preventDefault();
-      if (!input.isAutoRepeat) sendShortcut(toggle.action);
+    for (const actionId of SHORTCUT_ACTIONS) {
+      const binding = activeBindings[actionId];
+      if (!binding || binding.type !== "key") continue;
+      if (matchesKeyCombo(input, binding.combo, process.platform)) {
+        event.preventDefault();
+        if (!input.isAutoRepeat) sendShortcut(actionId);
+        return;
+      }
     }
   });
+}
+
+function getAcceleratorFor(actionId: string): string | undefined {
+  const binding = activeBindings[actionId];
+  if (!binding || binding.type !== "key") return undefined;
+  return comboToAccelerator(binding.combo, process.platform);
 }
 
 function isBrowserTileWebview(wc: WebContents): boolean {
@@ -302,7 +302,7 @@ function buildAppMenu(): void {
               { type: "separator" as const },
               {
                 label: "Settings\u2026",
-                accelerator: "CommandOrControl+,",
+                accelerator: getAcceleratorFor("toggle-settings"),
                 registerAccelerator: false,
                 click: () => sendShortcut("toggle-settings"),
               } as Electron.MenuItemConstructorOptions,
@@ -323,20 +323,20 @@ function buildAppMenu(): void {
       submenu: [
         {
           label: "New Tile",
-          accelerator: "CommandOrControl+N",
+          accelerator: getAcceleratorFor("new-tile"),
           registerAccelerator: false,
           click: () => sendShortcut("new-tile"),
         },
         {
           label: "Close Tile",
-          accelerator: "CommandOrControl+W",
+          accelerator: getAcceleratorFor("close-tile"),
           registerAccelerator: false,
           click: () => sendShortcut("close-tile"),
         },
         { type: "separator" },
         {
           label: "Open Workspace\u2026",
-          accelerator: "CommandOrControl+Shift+O",
+          accelerator: getAcceleratorFor("add-workspace"),
           registerAccelerator: false,
           click: () => sendShortcut("add-workspace"),
         },
@@ -355,7 +355,7 @@ function buildAppMenu(): void {
         { type: "separator" },
         {
           label: "Find",
-          accelerator: "CommandOrControl+K",
+          accelerator: getAcceleratorFor("focus-search"),
           registerAccelerator: false,
           click: () => sendShortcut("focus-search"),
         },
@@ -366,13 +366,13 @@ function buildAppMenu(): void {
       submenu: [
         {
           label: "Toggle Navigator",
-          accelerator: "CommandOrControl+\\",
+          accelerator: getAcceleratorFor("toggle-nav"),
           registerAccelerator: false,
           click: () => sendShortcut("toggle-nav"),
         },
         {
           label: "Toggle Terminal List",
-          accelerator: "CommandOrControl+`",
+          accelerator: getAcceleratorFor("toggle-terminal-list"),
           registerAccelerator: false,
           click: () => sendShortcut("toggle-terminal-list"),
         },
@@ -535,6 +535,12 @@ ipcMain.handle(
     setPref(config, key, value);
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("pref:changed", key, value);
+    }
+    if (key === "keybindings") {
+      activeBindings = mergeWithDefaults(
+        value as Partial<BindingsMap> ?? {},
+      );
+      buildAppMenu();
     }
   },
 );
@@ -782,6 +788,11 @@ app.whenReady().then(async () => {
 
   shuttingDown = false;
 
+  console.log(
+    `[startup] V8 heap limit: ${heapMB} MB` +
+      (import.meta.env.DEV ? " (dev mode)" : ""),
+  );
+
   config = loadConfig();
   installCli();
   watcher.startWorker();
@@ -815,12 +826,156 @@ app.whenReady().then(async () => {
     }
   });
 
+  // -- Process crash / OOM logging --
+
+  mainWindow!.webContents.on("render-process-gone", (_event, details) => {
+    console.error("[crash] Shell renderer gone:", details.reason, details);
+    trackEvent("renderer_crash", {
+      target: "shell",
+      reason: details.reason,
+      exitCode: details.exitCode,
+    });
+  });
+
+  mainWindow!.on("unresponsive", () => {
+    console.error("[crash] Main window unresponsive");
+    trackEvent("renderer_crash", { target: "shell", reason: "unresponsive" });
+  });
+
+  app.on("child-process-gone", (_event, details) => {
+    console.error(
+      `[crash] Child process gone: type=${details.type} reason=${details.reason}`,
+      details,
+    );
+    trackEvent("child_process_crash", {
+      type: details.type,
+      reason: details.reason,
+      serviceName: details.serviceName ?? "",
+      name: details.name ?? "",
+      exitCode: details.exitCode,
+    });
+  });
+
+  // Log webview (terminal/browser tile) renderer crashes
+  mainWindow!.webContents.on("did-attach-webview", (_event, wc) => {
+    wc.on("render-process-gone", (_e, details) => {
+      console.error(
+        `[crash] Webview renderer gone (pid=${wc.getOSProcessId()}):`,
+        details.reason, details,
+      );
+      trackEvent("renderer_crash", {
+        target: "webview",
+        reason: details.reason,
+        exitCode: details.exitCode,
+      });
+    });
+  });
+
   registerMethod("ping", () => ({ pong: true }), {
     description: "Health check — returns {pong: true}",
   });
   registerMethod("workspace.getConfig", () => config, {
     description: "Return the current app configuration",
   });
+
+  // -- Memory pressure watchdog --
+  // Periodically check the main-process heap and log diagnostics so
+  // memory leaks are caught before they trigger an OOM crash.
+  const HEAP_CHECK_INTERVAL_MS = 60_000; // every 60 s
+  const HEAP_DIAG_INTERVAL_MS = 5 * 60_000; // detailed log every 5 min
+  const HEAP_WARN_RATIO = 0.70;
+  const HEAP_CRIT_RATIO = 0.85;
+  const heapLimitBytes = heapMB * 1024 * 1024;
+  let lastHeapLevel: "ok" | "warn" | "critical" = "ok";
+  let lastDiagTime = 0;
+
+  setInterval(() => {
+    const mem = process.memoryUsage();
+    const ratio = mem.heapUsed / heapLimitBytes;
+    const usedMB = Math.round(mem.heapUsed / 1024 / 1024);
+    const totalMB = Math.round(mem.heapTotal / 1024 / 1024);
+    const rssMB = Math.round(mem.rss / 1024 / 1024);
+    const externalMB = Math.round(mem.external / 1024 / 1024);
+
+    // Periodic detailed diagnostics (every 5 min)
+    const now = Date.now();
+    if (now - lastDiagTime >= HEAP_DIAG_INTERVAL_MS) {
+      lastDiagTime = now;
+      console.log(
+        `[memory] heap: ${usedMB}/${totalMB} MB (${(ratio * 100).toFixed(0)}% of ${heapMB} MB limit)` +
+          ` | rss: ${rssMB} MB | external: ${externalMB} MB`,
+      );
+
+      // Log per-process memory breakdown to identify which process grows
+      try {
+        const metrics = app.getAppMetrics();
+        const summary = metrics.map((m) => {
+          const mem = m.memory;
+          return `${m.type}(pid=${m.pid}): ${Math.round(mem.workingSetSize / 1024)} MB`;
+        });
+        console.log(`[memory] processes: ${summary.join(" | ")}`);
+        console.log(
+          `[memory] pty sessions: ${pty.listSessions().length}`,
+        );
+      } catch {
+        // getAppMetrics may fail during shutdown
+      }
+    }
+
+    // Warning threshold
+    if (
+      ratio >= HEAP_WARN_RATIO &&
+      ratio < HEAP_CRIT_RATIO &&
+      lastHeapLevel === "ok"
+    ) {
+      lastHeapLevel = "warn";
+      console.warn(
+        `[memory] WARNING: heap ${usedMB} MB / ${heapMB} MB (${(ratio * 100).toFixed(0)}%)`,
+      );
+      trackEvent("memory_pressure", {
+        level: "warn",
+        heapUsedMB: usedMB,
+        heapLimitMB: heapMB,
+        rssMB,
+      });
+      dialog.showMessageBox({
+        type: "warning",
+        title: "High Memory Usage",
+        message: `Collaborator is using ${usedMB} MB of ${heapMB} MB available memory (${(ratio * 100).toFixed(0)}%).`,
+        detail:
+          "Consider closing unused terminals or restarting the app to free memory.",
+        buttons: ["OK"],
+        noLink: true,
+      });
+    }
+
+    // Critical threshold
+    if (ratio >= HEAP_CRIT_RATIO && lastHeapLevel !== "critical") {
+      lastHeapLevel = "critical";
+      console.error(
+        `[memory] CRITICAL: heap ${usedMB} MB / ${heapMB} MB (${(ratio * 100).toFixed(0)}%)`,
+      );
+      trackEvent("memory_pressure", {
+        level: "critical",
+        heapUsedMB: usedMB,
+        heapLimitMB: heapMB,
+        rssMB,
+      });
+      dialog.showMessageBox({
+        type: "error",
+        title: "Critical Memory Usage",
+        message: `Collaborator is using ${usedMB} MB of ${heapMB} MB available memory (${(ratio * 100).toFixed(0)}%).`,
+        detail:
+          "The app may crash soon. Please close terminals and restart the app.",
+        buttons: ["OK"],
+        noLink: true,
+      });
+    }
+
+    if (ratio < HEAP_WARN_RATIO) {
+      lastHeapLevel = "ok";
+    }
+  }, HEAP_CHECK_INTERVAL_MS).unref();
 
   try {
     await startJsonRpcServer();

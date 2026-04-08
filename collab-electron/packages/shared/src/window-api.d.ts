@@ -299,6 +299,13 @@ export interface CollabApi {
     }>,
   ) => Promise<string | null>;
 
+  // Input dialog (replaces window.prompt in sandboxed webviews)
+  showInputDialog: (opts: {
+    title?: string;
+    label?: string;
+    defaultValue?: string;
+  }) => Promise<string | null>;
+
   // IPC event listeners
   onFocusSearch: (cb: () => void) => Unsubscribe;
   onFileSelected: (

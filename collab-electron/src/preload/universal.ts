@@ -364,6 +364,11 @@ contextBridge.exposeInMainWorld("api", {
       enabled?: boolean;
     }>,
   ) => ipcRenderer.invoke("context-menu:show", items),
+  showInputDialog: (opts: {
+    title?: string;
+    label?: string;
+    defaultValue?: string;
+  }) => ipcRenderer.invoke("dialog:input", opts),
   close: () => ipcRenderer.send("settings:close"),
 
   // Integrations
@@ -564,6 +569,7 @@ contextBridge.exposeInMainWorld("api", {
       "terminal-list:add",
       "terminal-list:remove",
       "terminal-list:focus",
+      "terminal-list:adopted",
       "pty-status-changed",
       "pty-exit",
     ];

@@ -3,29 +3,30 @@ import {
 } from "./canvas-state.js";
 
 /**
- * Find a non-overlapping position on the canvas for a tile of the
- * given size. Scans on a 20 px grid within a 4000x3000 region.
+ * Find a position for a new tile on the canvas.
+ * Places the tile to the right of the farthest-right existing tile,
+ * aligned to that tile's top edge, with a 1-grid-unit (20 px) gap.
  */
 export function findAutoPlacement(existingTiles, width, height) {
-	const CANVAS_W = 4000;
-	const CANVAS_H = 3000;
-	const STEP = 20;
+	const GAP = 20; // 1 grid unit
 
-	for (let y = 0; y <= CANVAS_H - height; y += STEP) {
-		for (let x = 0; x <= CANVAS_W - width; x += STEP) {
-			const overlaps = existingTiles.some((t) =>
-				x < t.x + t.width &&
-				x + width > t.x &&
-				y < t.y + t.height &&
-				y + height > t.y,
-			);
-			if (!overlaps) return { x, y };
+	if (existingTiles.length === 0) {
+		return { x: 0, y: 0 };
+	}
+
+	let maxRight = -Infinity;
+	let alignY = 0;
+	for (const t of existingTiles) {
+		const right = t.x + t.width;
+		if (right > maxRight) {
+			maxRight = right;
+			alignY = t.y;
 		}
 	}
 
-	const last = existingTiles[existingTiles.length - 1];
-	if (last) return { x: last.x + 40, y: last.y + 40 };
-	return { x: 40, y: 40 };
+	const x = Math.round((maxRight + GAP) / 20) * 20;
+	const y = Math.round(alignY / 20) * 20;
+	return { x, y };
 }
 
 /**

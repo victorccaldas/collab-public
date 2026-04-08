@@ -491,8 +491,40 @@ export async function reconnectSession(
 }> {
   // Route based on the backend that originally created this session.
   // Sessions without a backend field are legacy tmux sessions.
-  const meta = readSessionMeta(sessionId);
-  const backend = sessionBackend(sessionId);
+  let meta = readSessionMeta(sessionId);
+  let backend = sessionBackend(sessionId);
+
+  // If there is no local meta file, ask the sidecar whether it owns
+  // this session before falling back to tmux.  This covers sessions
+  // created by a different Collab instance (e.g. production sessions
+  // accessed from dev mode) whose meta files live elsewhere.
+  if (!meta && backend === "tmux") {
+    try {
+      await ensureSidecar();
+      const client = getSidecarClient();
+      const list = await client.listSessions();
+      const info = list.find((s) => s.sessionId === sessionId);
+      if (info) {
+        backend = "sidecar";
+        meta = {
+          shell: info.shell,
+          cwd: info.cwdHostPath,
+          createdAt: info.createdAt,
+          target: info.target,
+          displayName: info.displayName,
+          command: info.shell,
+          args: [],
+          cwdHostPath: info.cwdHostPath,
+          cwdGuestPath: info.cwdGuestPath,
+          backend: "sidecar",
+        };
+        // Persist so future reconnections don't need another lookup.
+        writeSessionMeta(sessionId, meta);
+      }
+    } catch {
+      // Sidecar unavailable — continue with tmux fallback.
+    }
+  }
 
   if (backend === "sidecar") {
     await ensureSidecar();
@@ -897,7 +929,7 @@ export async function getForegroundProcess(
 
 const lastForeground = new Map<string, string>();
 const statusTimers = new Map<string, ReturnType<typeof setTimeout>>();
-const STATUS_DEBOUNCE_MS = 500;
+const STATUS_DEBOUNCE_MS = 2000;
 
 function sendToMainWindow(channel: string, payload: unknown): void {
   const { BrowserWindow } = require("electron");

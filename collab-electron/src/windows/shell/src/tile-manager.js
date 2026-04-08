@@ -182,7 +182,7 @@ export function createTileManager({
 
 	// -- Webview spawning --
 
-	function spawnTerminalWebview(tile, autoFocus = false) {
+	function spawnTerminalWebview(tile, autoFocus = false, opts = {}) {
 		const dom = tileDOMs.get(tile.id);
 		if (!dom) return;
 
@@ -193,6 +193,9 @@ export function createTileManager({
 		if (tile.ptySessionId) {
 			params.set("sessionId", tile.ptySessionId);
 			params.set("restored", "1");
+			if (opts.adoptOnly) {
+				params.set("adoptOnly", "1");
+			}
 		} else if (tile.cwd) {
 			params.set("cwd", tile.cwd);
 		}
@@ -205,6 +208,9 @@ export function createTileManager({
 		wv.setAttribute(
 			"webpreferences", "contextIsolation=yes, sandbox=yes",
 		);
+		// Share a single partition across all terminal webviews so Chromium
+		// can reuse renderer processes instead of spawning one per tile.
+		wv.setAttribute("partition", "persist:terminal");
 		wv.style.width = "100%";
 		wv.style.height = "100%";
 		wv.style.border = "none";
@@ -215,6 +221,32 @@ export function createTileManager({
 		wv.addEventListener("dom-ready", () => {
 			if (autoFocus) focusCanvasTile(tile.id);
 			wv.addEventListener("before-input-event", () => {});
+		});
+
+		wv.addEventListener("render-process-gone", (event) => {
+			const reason = event.details?.reason ?? "unknown";
+			console.error(
+				`[crash] Terminal webview renderer gone (tile=${tile.id}): ${reason}`,
+			);
+			// Show crash message and offer restart
+			if (dom.webview) {
+				try { dom.contentArea.removeChild(dom.webview); } catch {}
+				dom.webview = null;
+			}
+			const crashDiv = document.createElement("div");
+			crashDiv.style.cssText =
+				"padding:20px;color:#888;font-size:13px;text-align:center;";
+			crashDiv.innerHTML =
+				`Terminal process crashed (${reason}).<br>` +
+				`<button style="margin-top:8px;padding:4px 12px;cursor:pointer;` +
+				`border:1px solid #666;border-radius:4px;background:transparent;color:#aaa;"` +
+				`>Restart terminal</button>`;
+			crashDiv.querySelector("button").addEventListener("click", () => {
+				crashDiv.remove();
+				tile.ptySessionId = null;
+				spawnTerminalWebview(tile, true);
+			});
+			dom.contentArea.appendChild(crashDiv);
 		});
 
 		wv.addEventListener("ipc-message", (event) => {

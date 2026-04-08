@@ -3,6 +3,9 @@ import { join } from "node:path";
 
 const repoDir = process.cwd();
 
+// Raise V8 heap limit for the dev server / Electron main process
+process.env.NODE_OPTIONS = "--max-old-space-size=12288";
+
 const child = process.platform === "win32"
   ? spawn(
       "powershell.exe",

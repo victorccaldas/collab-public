@@ -77,7 +77,11 @@ export async function shouldIncludeEntryWithContent(
     return false;
   }
 
-  if (!filter || entry.isDirectory()) {
+  // Resolve symlinks: a symlink pointing to a directory must be treated
+  // as a directory so we don't attempt to read it as a file (EISDIR).
+  const isDir = await isEffectiveDirectory(dirPath, entry);
+
+  if (!filter || isDir) {
     return true;
   }
 

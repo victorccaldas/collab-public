@@ -223,20 +223,50 @@ const FolderRow = React.memo(function FolderRow({
 				onClick={async (e) => {
 					e.stopPropagation();
 					const choice = await window.api.showContextMenu([
-						{ id: "claude", label: "Claude" },
-						{ id: "copilot", label: "Copilot" },
+						{ id: "claude", label: "Claude (Opus)" },
+						{ id: "copilot", label: "Copilot (Opus)" },
+						{ id: "claude-test", label: "Claude-test (Haiku)" },
+						{ id: "copilot-test", label: "Copilot-test (GPT-5 Mini)" },
 					]);
-					if (choice === "claude") {
-						window.api.openInTerminal(
-							item.path,
-							"claude --dangerously-skip-permissions",
-						);
-					} else if (choice === "copilot") {
-						window.api.openInTerminal(
-							item.path,
-							"copilot --yolo",
-						);
+					if (!choice) return;
+					const FALLBACK_PROMPT = "Let's begin the session";
+					const saved = await window.api.getPref("aiAgentDefaultPrompt");
+					const defaultPrompt = (typeof saved === "string" && saved) ? saved : FALLBACK_PROMPT;
+					const promptChoice = await window.api.showContextMenu([
+						{ id: "default", label: `Default: "${defaultPrompt}"` },
+						{ id: "custom", label: "Custom prompt..." },
+						{ id: "change-default", label: "Change default prompt..." },
+					]);
+					if (!promptChoice) return;
+					if (promptChoice === "change-default") {
+						const input = await window.api.showInputDialog({
+							title: "Set default prompt",
+							label: "Default prompt:",
+							defaultValue: defaultPrompt,
+						});
+						if (input !== null && input.trim()) {
+							await window.api.setPref("aiAgentDefaultPrompt", input.trim());
+						}
+						return;
 					}
+					let q = defaultPrompt;
+					if (promptChoice === "custom") {
+						const input = await window.api.showInputDialog({
+							title: "Custom prompt",
+							label: "Enter your prompt:",
+							defaultValue: "",
+						});
+						if (input === null) return;
+						q = input.trim() || defaultPrompt;
+					}
+					const cmds: Record<string, string> = {
+						claude: `claude --dangerously-skip-permissions --model opus "${q}"`,
+						copilot: `copilot --yolo --model claude-opus-4.6 -i "${q}"`,
+						"claude-test": `claude --dangerously-skip-permissions --model haiku "${q}"`,
+						"copilot-test": `copilot --yolo --model gpt-5-mini -i "${q}"`,
+					};
+					const cmd = cmds[choice];
+					if (cmd) window.api.openInTerminal(item.path, cmd);
 				}}
 			>
 				<Robot size={12} weight="bold" />
