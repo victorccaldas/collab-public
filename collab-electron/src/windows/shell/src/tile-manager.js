@@ -206,7 +206,7 @@ export function createTileManager({
 		);
 		wv.setAttribute("preload", termConfig.preload);
 		wv.setAttribute(
-			"webpreferences", "contextIsolation=yes, sandbox=yes",
+			"webpreferences", "contextIsolation=yes, sandbox=yes, backgroundThrottling=no",
 		);
 		// Share a single partition across all terminal webviews so Chromium
 		// can reuse renderer processes instead of spawning one per tile.

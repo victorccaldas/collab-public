@@ -272,8 +272,9 @@ contextBridge.exposeInMainWorld("api", {
   ptyWrite: (sessionId: string, data: string) => {
     ipcRenderer.send("pty:write", { sessionId, data });
   },
-  ptySendRawKeys: (sessionId: string, data: string) =>
-    ipcRenderer.invoke("pty:send-raw-keys", { sessionId, data }),
+  ptySendRawKeys: (sessionId: string, data: string) => {
+    ipcRenderer.send("pty:send-raw-keys", { sessionId, data });
+  },
   ptyResize: (
     sessionId: string,
     cols: number,

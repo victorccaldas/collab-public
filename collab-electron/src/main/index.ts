@@ -1,4 +1,5 @@
 import "./logger";
+import * as v8 from "node:v8";
 import {
   app,
   BrowserWindow,
@@ -56,22 +57,22 @@ if (!process.env.LANG || !process.env.LANG.includes("UTF-8")) {
   process.env.LANG = "en_US.UTF-8";
 }
 
-// Raise V8 heap limits for the main process and renderer processes.
-// Each terminal webview is a separate renderer; heavy AI coding tools
-// (Claude, Copilot) generate large scrollback that can exhaust the
-// default ~1.4 GB heap.  Dev mode uses more memory (Vite HMR, longer
-// sessions) so we allow a larger heap there.
+// V8 heap limits.
 //
-// If NODE_OPTIONS already specifies --max-old-space-size (e.g. from
-// dev.mjs / dev.ps1), honour that value instead of overriding it.
-const DEFAULT_HEAP_MB = 8192;
-const nodeOptsMatch = (process.env.NODE_OPTIONS ?? "").match(
-  /--max-old-space-size=(\d+)/,
+// Electron 40's embedded V8 silently caps --max-old-space-size at 4096 MB
+// for the main process — values above that are ignored (verified empirically).
+// The only extra headroom comes from --max-semi-space-size (set in dev.ps1).
+// app.commandLine.appendSwitch("js-flags", ...) only affects RENDERER
+// processes, not the main process (V8 is already running by this point).
+//
+// For renderers (terminal webviews), we set a per-renderer limit.
+// Each webview is a separate process; with scrollback capped at 5K lines
+// they should stay well under this limit.
+const RENDERER_HEAP_MB = 2048;
+app.commandLine.appendSwitch(
+  "js-flags",
+  `--max-old-space-size=${RENDERER_HEAP_MB}`,
 );
-const heapMB = nodeOptsMatch
-  ? Math.max(Number(nodeOptsMatch[1]), DEFAULT_HEAP_MB)
-  : DEFAULT_HEAP_MB;
-app.commandLine.appendSwitch("js-flags", `--max-old-space-size=${heapMB}`);
 
 // Raise the maximum number of renderer processes Chromium will keep alive.
 // Default is ~4 on some platforms; we need more for many terminal tiles.
@@ -601,6 +602,13 @@ ipcMain.handle(
   (_event, { sessionId, data }: { sessionId: string; data: string }) =>
     pty.sendRawKeys(sessionId, data),
 );
+// Fire-and-forget path for raw keys (matches pty:write pattern)
+ipcMain.on(
+  "pty:send-raw-keys",
+  (_event, { sessionId, data }: { sessionId: string; data: string }) => {
+    pty.sendRawKeys(sessionId, data);
+  },
+);
 
 ipcMain.handle(
   "pty:resize",
@@ -663,6 +671,14 @@ ipcMain.handle(
     { sessionId, lines }: { sessionId: string; lines?: number },
   ) => pty.captureSession(sessionId, lines),
 );
+
+// Dump a V8 heap snapshot for memory leak analysis.
+// Returns the file path of the snapshot.
+ipcMain.handle("debug:heap-snapshot", async () => {
+  const snapshotPath = v8.writeHeapSnapshot();
+  console.log(`[memory] Heap snapshot written: ${snapshotPath}`);
+  return snapshotPath;
+});
 
 let settingsOpen = false;
 
@@ -788,8 +804,11 @@ app.whenReady().then(async () => {
 
   shuttingDown = false;
 
+  // Report V8's actual heap limit (NODE_OPTIONS sets the main process limit)
+  const v8Stats = v8.getHeapStatistics();
+  const actualLimitMB = Math.round(v8Stats.heap_size_limit / 1024 / 1024);
   console.log(
-    `[startup] V8 heap limit: ${heapMB} MB` +
+    `[startup] V8 heap limit: actual=${actualLimitMB} MB, renderers=${RENDERER_HEAP_MB} MB` +
       (import.meta.env.DEV ? " (dev mode)" : ""),
   );
 
@@ -885,9 +904,13 @@ app.whenReady().then(async () => {
   const HEAP_DIAG_INTERVAL_MS = 5 * 60_000; // detailed log every 5 min
   const HEAP_WARN_RATIO = 0.70;
   const HEAP_CRIT_RATIO = 0.85;
-  const heapLimitBytes = heapMB * 1024 * 1024;
+  // Use V8's actual reported limit, not our configured value
+  // (app.commandLine.appendSwitch only affects renderers, not the main process)
+  const actualHeapLimitMB = actualLimitMB;
+  const heapLimitBytes = actualHeapLimitMB * 1024 * 1024;
   let lastHeapLevel: "ok" | "warn" | "critical" = "ok";
   let lastDiagTime = 0;
+  let heapSnapshotTaken = false; // one-shot auto-snapshot for diagnostics
 
   setInterval(() => {
     const mem = process.memoryUsage();
@@ -897,12 +920,31 @@ app.whenReady().then(async () => {
     const rssMB = Math.round(mem.rss / 1024 / 1024);
     const externalMB = Math.round(mem.external / 1024 / 1024);
 
+    // Force GC when heap exceeds 50% — gives V8 a chance to reclaim
+    // before reaching dangerous levels. Only available with --expose-gc.
+    if (ratio >= 0.50 && typeof globalThis.gc === "function") {
+      globalThis.gc();
+    }
+
+    // Auto-capture a heap snapshot at 60% for diagnostics (one-time).
+    if (ratio >= 0.60 && !heapSnapshotTaken) {
+      heapSnapshotTaken = true;
+      try {
+        const snapshotPath = v8.writeHeapSnapshot();
+        console.warn(
+          `[memory] Auto heap snapshot at ${(ratio * 100).toFixed(0)}%: ${snapshotPath}`,
+        );
+      } catch (e) {
+        console.error("[memory] Failed to write heap snapshot:", e);
+      }
+    }
+
     // Periodic detailed diagnostics (every 5 min)
     const now = Date.now();
     if (now - lastDiagTime >= HEAP_DIAG_INTERVAL_MS) {
       lastDiagTime = now;
       console.log(
-        `[memory] heap: ${usedMB}/${totalMB} MB (${(ratio * 100).toFixed(0)}% of ${heapMB} MB limit)` +
+        `[memory] heap: ${usedMB}/${totalMB} MB (${(ratio * 100).toFixed(0)}% of ${actualHeapLimitMB} MB limit)` +
           ` | rss: ${rssMB} MB | external: ${externalMB} MB`,
       );
 
@@ -914,8 +956,14 @@ app.whenReady().then(async () => {
           return `${m.type}(pid=${m.pid}): ${Math.round(mem.workingSetSize / 1024)} MB`;
         });
         console.log(`[memory] processes: ${summary.join(" | ")}`);
+        const bufStats = pty.getBufferStats();
         console.log(
-          `[memory] pty sessions: ${pty.listSessions().length}`,
+          `[memory] pty sessions: ${pty.listSessions().length}` +
+            ` | buffered: ${Math.round(bufStats.totalBufferedBytes / 1024)} KB` +
+            ` | forwarded: ${Math.round(bufStats.totalBytesForwarded / 1024 / 1024)} MB` +
+            ` | pending timers: ${bufStats.pendingTimers}` +
+            ` | output paused: ${bufStats.outputPaused}` +
+            ` | pressure: ${bufStats.pressureActive}`,
         );
       } catch {
         // getAppMetrics may fail during shutdown
@@ -930,18 +978,18 @@ app.whenReady().then(async () => {
     ) {
       lastHeapLevel = "warn";
       console.warn(
-        `[memory] WARNING: heap ${usedMB} MB / ${heapMB} MB (${(ratio * 100).toFixed(0)}%)`,
+        `[memory] WARNING: heap ${usedMB} MB / ${actualHeapLimitMB} MB (${(ratio * 100).toFixed(0)}%)`,
       );
       trackEvent("memory_pressure", {
         level: "warn",
         heapUsedMB: usedMB,
-        heapLimitMB: heapMB,
+        heapLimitMB: actualHeapLimitMB,
         rssMB,
       });
       dialog.showMessageBox({
         type: "warning",
         title: "High Memory Usage",
-        message: `Collaborator is using ${usedMB} MB of ${heapMB} MB available memory (${(ratio * 100).toFixed(0)}%).`,
+        message: `Collaborator is using ${usedMB} MB of ${actualHeapLimitMB} MB available memory (${(ratio * 100).toFixed(0)}%).`,
         detail:
           "Consider closing unused terminals or restarting the app to free memory.",
         buttons: ["OK"],
@@ -953,18 +1001,18 @@ app.whenReady().then(async () => {
     if (ratio >= HEAP_CRIT_RATIO && lastHeapLevel !== "critical") {
       lastHeapLevel = "critical";
       console.error(
-        `[memory] CRITICAL: heap ${usedMB} MB / ${heapMB} MB (${(ratio * 100).toFixed(0)}%)`,
+        `[memory] CRITICAL: heap ${usedMB} MB / ${actualHeapLimitMB} MB (${(ratio * 100).toFixed(0)}%)`,
       );
       trackEvent("memory_pressure", {
         level: "critical",
         heapUsedMB: usedMB,
-        heapLimitMB: heapMB,
+        heapLimitMB: actualHeapLimitMB,
         rssMB,
       });
       dialog.showMessageBox({
         type: "error",
         title: "Critical Memory Usage",
-        message: `Collaborator is using ${usedMB} MB of ${heapMB} MB available memory (${(ratio * 100).toFixed(0)}%).`,
+        message: `Collaborator is using ${usedMB} MB of ${actualHeapLimitMB} MB available memory (${(ratio * 100).toFixed(0)}%).`,
         detail:
           "The app may crash soon. Please close terminals and restart the app.",
         buttons: ["OK"],

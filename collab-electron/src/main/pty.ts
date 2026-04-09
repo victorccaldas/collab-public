@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as net from "node:net";
 import * as crypto from "crypto";
+import * as v8 from "node:v8";
 import { type IDisposable } from "node-pty";
 import { displayBasename } from "@collab/shared/path-utils";
 import {
@@ -49,11 +50,142 @@ let sidecarClient: SidecarClient | null = null;
 /** Map of sessionId -> data socket for sidecar sessions. */
 const dataSockets = new Map<string, net.Socket>();
 
+// ── Main-process output batching ───────────────────────────────────
+// Batch pty output per session before forwarding via IPC to webviews.
+// Reduces IPC message count dramatically when multiple AI sessions
+// produce rapid output simultaneously.
+const MAIN_PTY_BATCH_MS = 16; // ~60fps, matches renderer-side buffer
+const MAX_BATCH_BYTES = 32 * 1024; // 32 KB cap per flush (was 256 KB)
+const outputBuffers = new Map<string, string[]>();
+const outputTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const outputBufSizes = new Map<string, number>(); // byte count tracking
+
+// ── Memory-pressure-aware output throttling ──────────────────────
+// When the main process heap is under pressure, reduce or stop
+// forwarding terminal output via IPC.  The sidecar's 8 MB ring buffer
+// retains data so nothing is permanently lost — the terminal can
+// replay missed output on reconnect.
+const PRESSURE_CHECK_INTERVAL_MS = 2_000;
+let lastPressureCheckAt = 0;
+let outputPaused = false;    // true → drop all new data
+let pressureActive = false;  // true → use reduced buffer cap
+let totalBytesForwarded = 0; // lifetime counter for diagnostics
+
+function checkMemoryPressure(): void {
+  const now = Date.now();
+  if (now - lastPressureCheckAt < PRESSURE_CHECK_INTERVAL_MS) return;
+  lastPressureCheckAt = now;
+  const stats = v8.getHeapStatistics();
+  const ratio = stats.used_heap_size / stats.heap_size_limit;
+  outputPaused = ratio >= 0.70;
+  pressureActive = ratio >= 0.50;
+}
+
+function getEffectiveMaxBytes(): number {
+  checkMemoryPressure();
+  if (outputPaused) return 0;
+  if (pressureActive) return 4 * 1024; // 4 KB under pressure
+  return MAX_BATCH_BYTES;
+}
+
+function forwardPtyData(
+  senderWebContentsId: number | undefined,
+  sessionId: string,
+  data: string,
+): void {
+  const maxBytes = getEffectiveMaxBytes();
+  if (maxBytes === 0) return; // memory pressure — drop data silently
+
+  let buf = outputBuffers.get(sessionId);
+  if (!buf) {
+    buf = [];
+    outputBuffers.set(sessionId, buf);
+    outputBufSizes.set(sessionId, 0);
+  }
+
+  let currentSize = outputBufSizes.get(sessionId) ?? 0;
+
+  // Back-pressure: if the buffer already exceeds the cap, the renderer
+  // can't keep up.  Drop the oldest chunks and keep only the tail.
+  if (currentSize + data.length > maxBytes) {
+    while (buf.length > 0 && currentSize + data.length > maxBytes) {
+      const dropped = buf.shift()!;
+      currentSize -= dropped.length;
+    }
+  }
+
+  buf.push(data);
+  currentSize += data.length;
+  outputBufSizes.set(sessionId, currentSize);
+
+  // Leading-edge: first chunk after quiet period fires immediately
+  if (!outputTimers.has(sessionId)) {
+    if (buf.length === 1) {
+      const flushed = buf.join("");
+      buf.length = 0;
+      outputBufSizes.set(sessionId, 0);
+      totalBytesForwarded += flushed.length;
+      sendToSender(senderWebContentsId, "pty:data", {
+        sessionId,
+        data: flushed,
+      });
+    }
+    outputTimers.set(
+      sessionId,
+      setTimeout(() => {
+        outputTimers.delete(sessionId);
+        const pending = outputBuffers.get(sessionId);
+        if (pending && pending.length > 0) {
+          const flushed = pending.join("");
+          pending.length = 0;
+          outputBufSizes.set(sessionId, 0);
+          totalBytesForwarded += flushed.length;
+          sendToSender(senderWebContentsId, "pty:data", {
+            sessionId,
+            data: flushed,
+          });
+        }
+      }, MAIN_PTY_BATCH_MS),
+    );
+  }
+}
+
+function cleanupOutputBuffer(sessionId: string): void {
+  const timer = outputTimers.get(sessionId);
+  if (timer) clearTimeout(timer);
+  outputTimers.delete(sessionId);
+  outputBuffers.delete(sessionId);
+  outputBufSizes.delete(sessionId);
+}
+
 /**
  * Track which sessions are sidecar-managed. Sidecar sessions never
  * touch the `sessions` Map (which holds IPty objects).
  */
 const sidecarSessionIds = new Set<string>();
+
+/** Return diagnostic stats about main-process PTY buffers. */
+export function getBufferStats(): {
+  sessions: number;
+  totalBufferedBytes: number;
+  pendingTimers: number;
+  totalBytesForwarded: number;
+  outputPaused: boolean;
+  pressureActive: boolean;
+} {
+  let totalBufferedBytes = 0;
+  for (const size of outputBufSizes.values()) {
+    totalBufferedBytes += size;
+  }
+  return {
+    sessions: dataSockets.size + sessions.size,
+    totalBufferedBytes,
+    pendingTimers: outputTimers.size,
+    totalBytesForwarded,
+    outputPaused,
+    pressureActive,
+  };
+}
 
 function getSidecarClient(): SidecarClient {
   if (!sidecarClient) throw new Error("Sidecar client not initialized");
@@ -183,6 +315,9 @@ async function doEnsureSidecar(): Promise<void> {
         };
         dataSockets.get(sessionId)?.destroy();
         dataSockets.delete(sessionId);
+        cleanupOutputBuffer(sessionId);
+        clearForegroundCache(sessionId);
+        sidecarSessionIds.delete(sessionId);
         deleteSessionMeta(sessionId);
         sendToMainWindow("pty:exit", { sessionId, exitCode });
       }
@@ -286,11 +421,7 @@ function attachClient(
 
   disposables.push(
     ptyProcess.onData((data: string) => {
-      sendToSender(
-        senderWebContentsId,
-        "pty:data",
-        { sessionId, data },
-      );
+      forwardPtyData(senderWebContentsId, sessionId, data);
       scheduleForegroundCheck(sessionId);
     }),
   );
@@ -313,6 +444,7 @@ function attachClient(
         // Also notify the shell BrowserWindow for terminal list cleanup
         sendToMainWindow("pty:exit", { sessionId, exitCode: 0 });
       }
+      cleanupOutputBuffer(sessionId);
       sessions.delete(sessionId);
     }),
   );
@@ -422,10 +554,7 @@ export async function createSession(
   const dataSock = await client.attachDataSocket(
     socketPath,
     (data) => {
-      sendToSender(senderWebContentsId, "pty:data", {
-        sessionId,
-        data,
-      });
+      forwardPtyData(senderWebContentsId, sessionId, data.toString("utf8"));
       scheduleForegroundCheck(sessionId);
     },
   );
@@ -536,10 +665,7 @@ export async function reconnectSession(
     const dataSock = await client.attachDataSocket(
       socketPath,
       (data) => {
-        sendToSender(senderWebContentsId, "pty:data", {
-          sessionId,
-          data,
-        });
+        forwardPtyData(senderWebContentsId, sessionId, data.toString("utf8"));
         scheduleForegroundCheck(sessionId);
       },
     );
@@ -685,6 +811,7 @@ export async function killSession(
   sessionId: string,
 ): Promise<void> {
   clearForegroundCache(sessionId);
+  cleanupOutputBuffer(sessionId);
   const backend = sessionBackend(sessionId);
   if (backend === "sidecar") {
     dataSockets.get(sessionId)?.destroy();
@@ -942,6 +1069,16 @@ function sendToMainWindow(channel: string, payload: unknown): void {
 }
 
 export function scheduleForegroundCheck(sessionId: string): void {
+  // On Windows, sidecar sessions use conpty which doesn't support
+  // foreground process detection — skip the expensive RPC entirely.
+  if (
+    process.platform === "win32"
+    && sessionBackend(sessionId) === "sidecar"
+  ) {
+    clearForegroundCache(sessionId);
+    return;
+  }
+
   const existing = statusTimers.get(sessionId);
   if (existing) clearTimeout(existing);
 

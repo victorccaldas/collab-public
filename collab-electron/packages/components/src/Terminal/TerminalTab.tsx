@@ -13,6 +13,10 @@ import "./TerminalTab.css";
 // at 60 fps, which caps render calls to ~60/s per terminal.
 const DATA_BUFFER_FLUSH_MS = 16;
 
+// Non-focused terminals use a longer flush interval so
+// the focused terminal gets more CPU headroom.
+const DATA_BUFFER_FLUSH_MS_BG = 250;
+
 // Coalesces rapid keystrokes into a single IPC message.
 // Without this, every key fires its own ipcRenderer.send
 // roundtrip through main → sidecar → PTY.  3ms batching
@@ -163,8 +167,10 @@ function TerminalTab({ sessionId, visible, restored, scrollbackData, mode }: Ter
 			return true;
 		});
 
-		// Input coalescing: buffer keystrokes and flush them in a
-		// single IPC call instead of one call per keystroke.
+		// Input coalescing: the FIRST keystroke after a quiet period
+		// is sent immediately (leading-edge flush) for zero latency.
+		// Subsequent rapid keystrokes within INPUT_COALESCE_MS are
+		// batched into a single IPC call.
 		let inputBuf = "";
 		let inputTimer: number | undefined;
 		const flushInput = () => {
@@ -176,15 +182,28 @@ function TerminalTab({ sessionId, visible, restored, scrollbackData, mode }: Ter
 		};
 
 		term.onData((data: string) => {
-			inputBuf += data;
 			if (inputTimer === undefined) {
+				// Leading edge: send first keystroke immediately
+				window.api.ptyWrite(sessionId, data);
 				inputTimer = window.setTimeout(flushInput, INPUT_COALESCE_MS);
+			} else {
+				inputBuf += data;
 			}
 		});
 
 		let dataBuffer: Uint8Array[] = [];
 		let flushTimer: number | undefined;
 		let firstData = true;
+
+		const applyFirstDataReset = () => {
+			if (!firstData) return;
+			firstData = false;
+			if (restored && mode !== "sidecar") {
+				term.write("\x1b[2J\x1b[H");
+			} else if (!restored) {
+				term.reset();
+			}
+		};
 
 		const flushData = () => {
 			if (dataBuffer.length === 0) {
@@ -194,14 +213,7 @@ function TerminalTab({ sessionId, visible, restored, scrollbackData, mode }: Ter
 			const chunks = dataBuffer;
 			dataBuffer = [];
 			flushTimer = undefined;
-			if (firstData) {
-				firstData = false;
-				if (restored && mode !== "sidecar") {
-					term.write("\x1b[2J\x1b[H");
-				} else if (!restored) {
-					term.reset();
-				}
-			}
+			applyFirstDataReset();
 			for (const chunk of chunks) {
 				term.write(chunk);
 			}
@@ -212,12 +224,19 @@ function TerminalTab({ sessionId, visible, restored, scrollbackData, mode }: Ter
 			data: Uint8Array;
 		}) => {
 			if (payload.sessionId !== sessionId) return;
-			dataBuffer.push(payload.data);
+			// Focused terminal gets 16ms flush (real-time feel);
+			// background terminals get 100ms (saves CPU for the
+			// terminal the user is actively typing in).
+			const interval = document.hasFocus()
+				? DATA_BUFFER_FLUSH_MS
+				: DATA_BUFFER_FLUSH_MS_BG;
 			if (flushTimer === undefined) {
-				flushTimer = window.setTimeout(
-					flushData,
-					DATA_BUFFER_FLUSH_MS,
-				);
+				// Leading edge: render first chunk immediately
+				applyFirstDataReset();
+				term.write(payload.data);
+				flushTimer = window.setTimeout(flushData, interval);
+			} else {
+				dataBuffer.push(payload.data);
 			}
 		};
 		window.api.onPtyData(sessionId, handleData);

@@ -229,7 +229,7 @@ export interface CollabApi {
   ptySendRawKeys: (
     sessionId: string,
     data: string,
-  ) => Promise<void>;
+  ) => void;
   ptyResize: (
     sessionId: string,
     cols: number,

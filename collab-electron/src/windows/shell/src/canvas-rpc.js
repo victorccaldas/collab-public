@@ -180,7 +180,7 @@ export function createCanvasRpc({
 						respondError(requestId, 4, "Terminal has no session");
 						return;
 					}
-					await window.shellApi.ptyWrite(
+					window.shellApi.ptyWrite(
 						tile.ptySessionId, params.input,
 					);
 					result = {};
